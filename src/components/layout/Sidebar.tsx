@@ -5,6 +5,7 @@ import { useThemeStore } from '@/stores/themeStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useXPStore, getXPLevelInfo } from '@/stores/xpStore';
 import { useDynamicSectionsStore } from '@/stores/dynamicSectionsStore';
+import { TokenCounter } from '@/components/ui/TokenCounter';
 
 export function Sidebar() {
   const { sidebarCollapsed, toggleSidebar } = useThemeStore();
@@ -134,6 +135,13 @@ export function Sidebar() {
           </div>
         </div>
       </div>
+
+      {/* Daily API Usage Tracker (Compact) */}
+      {!sidebarCollapsed && (
+        <div className="px-4 py-2.5 border-t animate-fade-in" style={{ borderColor: 'var(--border)' }}>
+          <TokenCounter variant="compact" />
+        </div>
+      )}
 
       {/* Collapse toggle */}
       <button

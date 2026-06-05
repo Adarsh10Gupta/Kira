@@ -3,13 +3,14 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   User, Palette, Bell, Target, Database,
   Shield, Sun, Moon, Monitor, LogOut, Trash2,
-  Download, Check, Key, Eye, EyeOff, Loader2, AlertTriangle
+  Download, Check, Key, Eye, EyeOff, Loader2, AlertTriangle, Zap
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { useThemeStore } from '@/stores/themeStore';
 import { useToastStore } from '@/stores/toastStore';
 import { reinitSupabaseClient, isSupabaseConfigured, supabase } from '@/lib/supabase';
 import { db } from '@/lib/db';
+import { TokenCounter } from '@/components/ui/TokenCounter';
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -409,6 +410,11 @@ export function SettingsPage() {
             Credentials are saved locally in your browser cache. Never share them publicly.
           </p>
         </div>
+      </motion.div>
+
+      {/* AI Usage Tracker Section */}
+      <motion.div variants={itemVariants}>
+        <TokenCounter variant="full" />
       </motion.div>
 
       {/* Developer Settings Section (Clear / Reset Data) */}

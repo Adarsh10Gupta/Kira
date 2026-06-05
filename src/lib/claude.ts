@@ -43,5 +43,60 @@ export async function callClaude(
   }
 
   const data = await response.json();
+
+  // Save token usage
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const usageKey = `kira_token_usage_${today}`;
+
+    // Get existing usage for today
+    const existing = JSON.parse(
+      localStorage.getItem(usageKey) || 
+      '{"requests": 0, "inputTokens": 0, "outputTokens": 0, "totalTokens": 0}'
+    );
+
+    // Gemini returns token counts in the response
+    const inputTokens = data.usageMetadata?.promptTokenCount || 0;
+    const outputTokens = data.usageMetadata?.candidatesTokenCount || 0;
+
+    // Update usage
+    const updated = {
+      requests: existing.requests + 1,
+      inputTokens: existing.inputTokens + inputTokens,
+      outputTokens: existing.outputTokens + outputTokens,
+      totalTokens: (existing.inputTokens + inputTokens) + 
+                   (existing.outputTokens + outputTokens)
+    };
+    localStorage.setItem(usageKey, JSON.stringify(updated));
+
+    // Clean up yesterday
+    const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+    localStorage.removeItem(`kira_token_usage_${yesterday}`);
+
+    window.dispatchEvent(new Event('kira_token_update'));
+  } catch (e) {
+    console.error('Failed to update Gemini token tracking:', e);
+  }
+
   return data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response generated.';
+}
+
+export function getTodayUsage() {
+  const today = new Date().toISOString().split('T')[0];
+  const usageKey = `kira_token_usage_${today}`;
+  try {
+    const val = localStorage.getItem(usageKey);
+    if (val) {
+      const parsed = JSON.parse(val);
+      return {
+        requests: parsed.requests || 0,
+        inputTokens: parsed.inputTokens || 0,
+        outputTokens: parsed.outputTokens || 0,
+        totalTokens: parsed.totalTokens || (parsed.inputTokens || 0) + (parsed.outputTokens || 0),
+      };
+    }
+  } catch (e) {
+    // ignore
+  }
+  return { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 }

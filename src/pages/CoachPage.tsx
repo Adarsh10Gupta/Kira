@@ -6,7 +6,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useXPStore } from '@/stores/xpStore';
 import { useDynamicSectionsStore, type DynamicSectionConfig } from '@/stores/dynamicSectionsStore';
 import { useToastStore } from '@/stores/toastStore';
-import { callClaude } from '@/lib/claude';
+import { callClaude, getTodayUsage } from '@/lib/claude';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { db } from '@/lib/db';
@@ -44,6 +44,15 @@ export function CoachPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [buildingSectionName, setBuildingSectionName] = useState<string | null>(null);
   const [systemPrompt, setSystemPrompt] = useState('');
+  const [tokenUsage, setTokenUsage] = useState(() => getTodayUsage());
+
+  useEffect(() => {
+    const handler = () => setTokenUsage(getTodayUsage());
+    window.addEventListener('kira_token_update', handler);
+    return () => window.removeEventListener('kira_token_update', handler);
+  }, []);
+
+  const remaining = Math.max(0, 1500 - tokenUsage.requests);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -161,10 +170,10 @@ You have special abilities:
       // Fetch habits
       const { data: habitsData } = await supabase
         .from('habits')
-        .select('name, streak')
+        .select('name')
         .eq('user_id', user.id);
       const habitsStr = habitsData && habitsData.length > 0
-        ? habitsData.map((h) => `${h.name} (${h.streak || 0}d streak)`).join(', ')
+        ? habitsData.map((h) => h.name).join(', ')
         : 'No habits configured';
 
       const prompt = `You are Kira, a personal AI life coach and guide for this user. You are talking to ${displayName}.
@@ -638,16 +647,26 @@ Otherwise use your knowledge to pre-populate relevant, extensive contents.`;
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask your coach anything or request to track a new study topic/exam..."
+            placeholder={remaining === 0 ? "Daily limit reached. Resets at midnight." : "Ask your coach anything or request to track a new study topic/exam..."}
             rows={1}
+            disabled={remaining === 0}
             className="flex-1 px-3 py-2 text-sm bg-transparent resize-none outline-none border-none focus:ring-0"
             style={{ color: 'var(--text)', maxHeight: 120 }}
           />
+          {remaining === 0 ? (
+            <span className="text-[10px] text-red-500 font-semibold self-center px-2 select-none">
+              Daily limit reached. Resets at midnight.
+            </span>
+          ) : (
+            <span className={`text-[9px] self-center px-1 font-medium select-none ${remaining < 50 ? 'text-amber-500 font-bold' : 'text-zinc-500'}`}>
+              {remaining} requests left today
+            </span>
+          )}
           <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
             onClick={() => sendMessage(input)}
-            disabled={!input.trim() || isTyping}
+            disabled={!input.trim() || isTyping || remaining === 0}
             className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 bg-gradient-to-r from-primary to-secondary text-white disabled:opacity-40 transition-opacity"
           >
             <Send size={16} />

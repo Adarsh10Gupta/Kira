@@ -22,8 +22,16 @@ const getInitialConfig = () => {
 let config = getInitialConfig();
 export let isSupabaseConfigured = config.configured;
 
-const createNewClient = (url: string, key: string, isConfigured: boolean): SupabaseClient => {
-  return isConfigured
+const getSupabaseInstance = (url: string, key: string, isConfigured: boolean): SupabaseClient => {
+  const globalRef = globalThis as any;
+  const instanceKey = '__supabase_client_instance';
+  const urlKey = '__supabase_client_url';
+
+  if (globalRef[instanceKey] && globalRef[urlKey] === url) {
+    return globalRef[instanceKey];
+  }
+
+  const client = isConfigured
     ? createClient(url, key, {
         auth: {
           persistSession: true,
@@ -34,9 +42,13 @@ const createNewClient = (url: string, key: string, isConfigured: boolean): Supab
     : createClient('https://placeholder.supabase.co', 'placeholder-key', {
         auth: { persistSession: false },
       });
+
+  globalRef[instanceKey] = client;
+  globalRef[urlKey] = url;
+  return client;
 };
 
-export let supabase: SupabaseClient = createNewClient(config.url, config.key, config.configured);
+export let supabase: SupabaseClient = getSupabaseInstance(config.url, config.key, config.configured);
 
 export function reinitSupabaseClient(url: string, anonKey: string) {
   if (url) localStorage.setItem('KIRA_SUPABASE_URL', url);
@@ -47,5 +59,10 @@ export function reinitSupabaseClient(url: string, anonKey: string) {
 
   const newConfig = getInitialConfig();
   isSupabaseConfigured = newConfig.configured;
-  supabase = createNewClient(newConfig.url, newConfig.key, newConfig.configured);
+
+  const globalRef = globalThis as any;
+  delete globalRef['__supabase_client_instance'];
+  delete globalRef['__supabase_client_url'];
+
+  supabase = getSupabaseInstance(newConfig.url, newConfig.key, newConfig.configured);
 }

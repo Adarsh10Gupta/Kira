@@ -243,19 +243,7 @@ export function DashboardPage() {
       setIncome(totalIncome);
 
       // 7. Load AI Brief
-      const cachedBrief = localStorage.getItem('KIRA_MORNING_BRIEF_DATA');
-      const cachedBriefDate = localStorage.getItem('KIRA_MORNING_BRIEF_DATE');
-
-      if (cachedBrief && cachedBriefDate === todayStr) {
-        try {
-          setBrief(JSON.parse(cachedBrief));
-          setLoadingBrief(false);
-        } catch {
-          generateAIBrief();
-        }
-      } else {
-        generateAIBrief();
-      }
+      generateAIBrief();
 
       // 8. Generate Weekly XP Data
       generateWeeklyXPChart();
@@ -305,7 +293,23 @@ export function DashboardPage() {
     }
   };
 
-  const generateAIBrief = async () => {
+  const generateAIBrief = async (forceRefresh = false) => {
+    const today = new Date().toISOString().split('T')[0];
+    const cacheKey = `kira_morning_brief_${today}`;
+
+    if (!forceRefresh) {
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        try {
+          setBrief(JSON.parse(cached));
+          setLoadingBrief(false);
+          return;
+        } catch {
+          // ignore and fetch fresh
+        }
+      }
+    }
+
     setLoadingBrief(true);
     const todayStr = getToday();
 
@@ -359,8 +363,11 @@ export function DashboardPage() {
 
       if (parsed.greeting && parsed.focus) {
         setBrief(parsed);
-        localStorage.setItem('KIRA_MORNING_BRIEF_DATA', JSON.stringify(parsed));
-        localStorage.setItem('KIRA_MORNING_BRIEF_DATE', todayStr);
+        localStorage.setItem(cacheKey, JSON.stringify(parsed));
+        
+        // Clean up yesterday's cache to avoid localStorage bloat
+        const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+        localStorage.removeItem(`kira_morning_brief_${yesterday}`);
       }
     } catch (err) {
       console.error('Failed to generate AI morning brief:', err);
@@ -374,6 +381,13 @@ export function DashboardPage() {
     } finally {
       setLoadingBrief(false);
     }
+  };
+
+  const handleRefresh = async () => {
+    const today = new Date().toISOString().split('T')[0];
+    const cacheKey = `kira_morning_brief_${today}`;
+    localStorage.removeItem(cacheKey);
+    await generateAIBrief(true);
   };
 
   const handleCompleteOnboarding = async () => {
@@ -691,7 +705,7 @@ export function DashboardPage() {
 
                 <div className="flex items-center justify-between border-t border-zinc-800/40 pt-3 text-[10px] text-zinc-500 italic">
                   <span>"{brief.motivation}"</span>
-                  <button onClick={generateAIBrief} className="text-primary hover:underline font-semibold not-italic">Refresh</button>
+                  <button onClick={handleRefresh} className="text-primary hover:underline font-semibold not-italic">Refresh</button>
                 </div>
               </div>
             ) : (

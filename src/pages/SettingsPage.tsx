@@ -33,7 +33,6 @@ export function SettingsPage() {
   // API Keys States
   const [claudeKey, setClaudeKey] = useState(
     localStorage.getItem('KIRA_GEMINI_KEY') ||
-    localStorage.getItem('KIRA_CLAUDE_KEY') ||
     ''
   );
   const [sbUrl, setSbUrl] = useState(localStorage.getItem('KIRA_SUPABASE_URL') || '');
@@ -58,7 +57,6 @@ export function SettingsPage() {
 
   const handleSaveKeys = () => {
     localStorage.setItem('KIRA_GEMINI_KEY', claudeKey);
-    localStorage.setItem('KIRA_CLAUDE_KEY', claudeKey);
     localStorage.setItem('KIRA_SUPABASE_URL', sbUrl);
     localStorage.setItem('KIRA_SUPABASE_ANON_KEY', sbKey);
 

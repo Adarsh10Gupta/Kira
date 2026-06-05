@@ -1,54 +1,46 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 const getInitialConfig = () => {
-  const localUrl = localStorage.getItem('KIRA_SUPABASE_URL');
-  const localKey = localStorage.getItem('KIRA_SUPABASE_ANON_KEY');
-  const envUrl = import.meta.env.VITE_SUPABASE_URL;
-  const envKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-  const url = localUrl || envUrl || '';
-  const key = localKey || envKey || '';
-  const configured = Boolean(
-    url && 
-    key && 
-    url.startsWith('http') && 
-    !url.includes('your_supabase_url') &&
-    key !== 'placeholder-key'
-  );
-
-  return { url, key, configured };
+  const url = localStorage.getItem('KIRA_SUPABASE_URL') || 
+    import.meta.env.VITE_SUPABASE_URL || '';
+  const key = localStorage.getItem('KIRA_SUPABASE_ANON_KEY') || 
+    import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+  return { url, key };
 };
 
-let config = getInitialConfig();
-export let isSupabaseConfigured = config.configured;
+const config = getInitialConfig();
 
-const getSupabaseInstance = (url: string, key: string, isConfigured: boolean): SupabaseClient => {
-  const globalRef = globalThis as any;
-  const instanceKey = '__supabase_client_instance';
-  const urlKey = '__supabase_client_url';
+// To prevent throwing an error on empty URL/key during initialization,
+// we use a placeholder when not configured.
+const activeUrl = config.url && config.url.startsWith('http') && !config.url.includes('your_supabase_url')
+  ? config.url
+  : 'https://placeholder.supabase.co';
 
-  if (globalRef[instanceKey] && globalRef[urlKey] === url) {
-    return globalRef[instanceKey];
-  }
+const activeKey = config.key && config.key !== 'placeholder-key' && config.key !== 'your_supabase_anon_key'
+  ? config.key
+  : 'placeholder-key';
 
-  const client = isConfigured
-    ? createClient(url, key, {
-        auth: {
-          persistSession: true,
-          autoRefreshToken: true,
-          detectSessionInUrl: true,
-        },
-      })
-    : createClient('https://placeholder.supabase.co', 'placeholder-key', {
-        auth: { persistSession: false },
-      });
+export let isSupabaseConfigured = Boolean(
+  config.url &&
+  config.key &&
+  config.url.startsWith('http') &&
+  !config.url.includes('your_supabase_url') &&
+  config.key !== 'placeholder-key'
+);
 
-  globalRef[instanceKey] = client;
-  globalRef[urlKey] = url;
-  return client;
-};
+let _supabase: SupabaseClient | null = null;
 
-export let supabase: SupabaseClient = getSupabaseInstance(config.url, config.key, config.configured);
+export let supabase: SupabaseClient = (() => {
+  if (_supabase) return _supabase;
+  _supabase = createClient(activeUrl, activeKey, {
+    auth: {
+      persistSession: isSupabaseConfigured,
+      autoRefreshToken: isSupabaseConfigured,
+      detectSessionInUrl: isSupabaseConfigured,
+    }
+  });
+  return _supabase;
+})();
 
 export function reinitSupabaseClient(url: string, anonKey: string) {
   if (url) localStorage.setItem('KIRA_SUPABASE_URL', url);
@@ -57,12 +49,23 @@ export function reinitSupabaseClient(url: string, anonKey: string) {
   if (anonKey) localStorage.setItem('KIRA_SUPABASE_ANON_KEY', anonKey);
   else localStorage.removeItem('KIRA_SUPABASE_ANON_KEY');
 
-  const newConfig = getInitialConfig();
-  isSupabaseConfigured = newConfig.configured;
+  isSupabaseConfigured = Boolean(
+    url &&
+    anonKey &&
+    url.startsWith('http') &&
+    !url.includes('your_supabase_url') &&
+    anonKey !== 'placeholder-key'
+  );
 
-  const globalRef = globalThis as any;
-  delete globalRef['__supabase_client_instance'];
-  delete globalRef['__supabase_client_url'];
+  const finalUrl = isSupabaseConfigured ? url : 'https://placeholder.supabase.co';
+  const finalKey = isSupabaseConfigured ? anonKey : 'placeholder-key';
 
-  supabase = getSupabaseInstance(newConfig.url, newConfig.key, newConfig.configured);
+  _supabase = createClient(finalUrl, finalKey, {
+    auth: {
+      persistSession: isSupabaseConfigured,
+      autoRefreshToken: isSupabaseConfigured,
+      detectSessionInUrl: isSupabaseConfigured,
+    }
+  });
+  supabase = _supabase;
 }

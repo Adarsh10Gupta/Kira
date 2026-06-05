@@ -1,8 +1,7 @@
 const getApiKey = () =>
-  localStorage.getItem('KIRA_CLAUDE_KEY') ||
   localStorage.getItem('KIRA_GEMINI_KEY') ||
+  localStorage.getItem('KIRA_CLAUDE_KEY') ||
   import.meta.env.VITE_GEMINI_API_KEY ||
-  import.meta.env.VITE_ANTHROPIC_API_KEY ||
   '';
 
 interface Message {

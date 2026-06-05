@@ -438,7 +438,6 @@ export function DashboardPage() {
       // 3. Save API key if provided
       if (onboardingApiKey.trim()) {
         localStorage.setItem('KIRA_GEMINI_KEY', onboardingApiKey.trim());
-        localStorage.setItem('KIRA_CLAUDE_KEY', onboardingApiKey.trim());
       }
 
       // 4. Trigger XP log for onboarding

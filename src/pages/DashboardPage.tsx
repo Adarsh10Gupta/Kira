@@ -3,18 +3,18 @@ import { useNavigate, Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Flame, CheckCircle2, Clock, IndianRupee, Salad, 
-  Droplet, Sparkles, BookOpen, AlertCircle, Info, ChevronRight
+  Droplet, Sparkles, BookOpen, AlertCircle, Info, ChevronRight, Target
 } from 'lucide-react';
 import { 
-  BarChart, Bar, LineChart, Line, XAxis, YAxis, 
-  Tooltip, ResponsiveContainer, CartesianGrid, Legend 
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts';
 import { ProgressRing } from '@/components/ui/ProgressRing';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { useAuthStore } from '@/stores/authStore';
 import { useXPStore } from '@/stores/xpStore';
+import { useToastStore } from '@/stores/toastStore';
 import { getToday, getDaysAgo, formatCurrency } from '@/lib/utils';
-import { db } from '@/lib/db';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { callClaude } from '@/lib/claude';
 
 // Animation variants
@@ -40,6 +40,7 @@ export function DashboardPage() {
   const { profile } = useAuthStore();
   const { xp } = useXPStore();
   const navigate = useNavigate();
+  const { showToast } = useToastStore();
 
   const [loadingBrief, setLoadingBrief] = useState(true);
   const [brief, setBrief] = useState<BriefData | null>(null);
@@ -51,41 +52,150 @@ export function DashboardPage() {
   const [dietProgress, setDietProgress] = useState({ current: 0, target: 120 });
 
   // Core metrics
-  const [streak, setStreak] = useState(12);
-  const [tasksDone, setTasksDone] = useState(5);
-  const [studyH, setStudyH] = useState(21);
-  const [income, setIncome] = useState(8500);
+  const [streak, setStreak] = useState(0);
+  const [tasksDone, setTasksDone] = useState(0);
+  const [studyH, setStudyH] = useState(0);
+  const [income, setIncome] = useState(0);
 
   // Goal progress cards
   const [goals, setGoals] = useState<any[]>([]);
 
+  // Onboarding States
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState(1);
+  const [onboardingName, setOnboardingName] = useState('');
+  const [selectedPresets, setSelectedPresets] = useState<string[]>([]);
+  const [onboardingApiKey, setOnboardingApiKey] = useState('');
+
   useEffect(() => {
-    loadDashboardData();
+    checkProfileAndLoad();
   }, []);
+
+  async function checkProfileAndLoad() {
+    if (!isSupabaseConfigured) {
+      loadDashboardData();
+      return;
+    }
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data: profileRow } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', user.id)
+        .maybeSingle();
+
+      if (!profileRow) {
+        setShowOnboarding(true);
+      } else {
+        loadDashboardData();
+      }
+    } catch (e) {
+      console.error(e);
+      loadDashboardData();
+    }
+  };
+
+  const calculateStreak = (dateLogs: { date: string }[]) => {
+    if (!dateLogs || dateLogs.length === 0) return 0;
+    
+    // Get unique dates sorted descending
+    const dates = Array.from(new Set(dateLogs.map(l => l.date)))
+      .map(d => new Date(d))
+      .sort((a, b) => b.getTime() - a.getTime());
+      
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    const firstLogDate = new Date(dates[0]);
+    firstLogDate.setHours(0, 0, 0, 0);
+    
+    if (firstLogDate.getTime() !== today.getTime() && firstLogDate.getTime() !== yesterday.getTime()) {
+      return 0;
+    }
+    
+    let streakVal = 1;
+    let currentRef = firstLogDate;
+    
+    for (let i = 1; i < dates.length; i++) {
+      const nextDate = new Date(dates[i]);
+      nextDate.setHours(0, 0, 0, 0);
+      
+      const diffTime = Math.abs(currentRef.getTime() - nextDate.getTime());
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      
+      if (diffDays === 1) {
+        streakVal++;
+        currentRef = nextDate;
+      } else if (diffDays > 1) {
+        break;
+      }
+    }
+    return streakVal;
+  };
+
+  const getStartOfWeek = () => {
+    const d = new Date();
+    const day = d.getDay();
+    const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+    const start = new Date(d.setDate(diff));
+    start.setHours(0, 0, 0, 0);
+    return start.toISOString().split('T')[0];
+  };
+
+  const getStartOfMonth = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+  };
 
   const loadDashboardData = async () => {
     const todayStr = getToday();
 
-    // 1. Fetch diet progress
-    let targetProtein = 120;
-    try {
-      const localProfile = await db.nutrition_profiles.toArray();
-      if (localProfile.length > 0) {
-        targetProtein = localProfile[0].config.protein_target || 120;
-      }
-      
-      const localFoodLog = await db.food_logs.where({ date: todayStr }).first();
-      const currentProtein = localFoodLog ? localFoodLog.total_protein : 0;
-      setDietProgress({ current: currentProtein, target: targetProtein });
-    } catch (e) {
-      console.error(e);
+    if (!isSupabaseConfigured) {
+      setGoals([]);
+      setStreak(0);
+      setTasksDone(0);
+      setStudyH(0);
+      setIncome(0);
+      setLoadingBrief(false);
+      return;
     }
 
-    // 2. Fetch goals
     try {
-      const localGoals = await db.goals.toArray();
-      if (localGoals.length > 0) {
-        setGoals(localGoals.map((g) => ({
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      // 1. Fetch diet progress
+      let targetProtein = 120;
+      const { data: profileData } = await supabase
+        .from('nutrition_profiles')
+        .select('*')
+        .eq('user_id', user.id)
+        .maybeSingle();
+      if (profileData) {
+        targetProtein = profileData.protein_target || 120;
+      }
+      
+      const { data: foodLog } = await supabase
+        .from('food_logs')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('date', todayStr)
+        .maybeSingle();
+      const currentProtein = foodLog ? foodLog.total_protein : 0;
+      setDietProgress({ current: currentProtein, target: targetProtein });
+
+      // 2. Fetch goals
+      const { data: goalsData } = await supabase
+        .from('goals')
+        .select('*')
+        .eq('user_id', user.id);
+      if (goalsData && goalsData.length > 0) {
+        setGoals(goalsData.map((g) => ({
           name: g.name,
           current: g.current_amount || 0,
           target: g.target_amount || 1000,
@@ -93,59 +203,80 @@ export function DashboardPage() {
           icon: g.category === 'Money' ? '📷' : '✈️',
         })));
       } else {
-        setGoals([
-          { name: 'Camera Fund', current: 4200, target: 15000, color: '#6366f1', icon: '📷' },
-          { name: 'Travel Fund', current: 8900, target: 30000, color: '#8b5cf6', icon: '✈️' },
-        ]);
+        setGoals([]);
       }
-    } catch (e) {
-      console.error(e);
-    }
 
-    // 3. Fetch static logs summary
-    try {
-      const habits = await db.habits.toArray();
-      const completions = await db.habit_completions.where({ date: todayStr }).toArray();
-      setTasksDone(completions.length || 5);
-      
-      const activeStreak = habits.reduce((max, h) => Math.max(max, h.streak || 0), 0);
-      setStreak(activeStreak > 0 ? activeStreak : 12);
+      // 3. Fetch streak
+      const { data: logsData } = await supabase
+        .from('daily_logs')
+        .select('date')
+        .eq('user_id', user.id)
+        .order('date', { ascending: false });
+      setStreak(calculateStreak(logsData || []));
 
-      const logsLast7 = await db.daily_logs.where('date').aboveOrEqual(getDaysAgo(7)).toArray();
-      const totalStudyMin = logsLast7.reduce((sum, l) => sum + (l.study_minutes || 0), 0);
-      setStudyH(Math.round(totalStudyMin / 60) || 21);
+      // 4. Tasks done today
+      const { count: tasksDoneCount } = await supabase
+        .from('habit_completions')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', user.id)
+        .eq('date', todayStr);
+      setTasksDone(tasksDoneCount || 0);
 
-      const incomeList = await db.income.toArray();
-      const paidIncome = incomeList.filter((i) => i.status === 'Paid').reduce((sum, i) => sum + i.amount, 0);
-      setIncome(paidIncome || 8500);
-    } catch (e) {
-      console.error(e);
-    }
+      // 5. Study hours this week
+      const startOfWeekStr = getStartOfWeek();
+      const { data: weekLogs } = await supabase
+        .from('daily_logs')
+        .select('study_minutes')
+        .eq('user_id', user.id)
+        .gte('date', startOfWeekStr);
+      const totalStudyMin = weekLogs?.reduce((sum, l) => sum + (l.study_minutes || 0), 0) || 0;
+      setStudyH(Math.round(totalStudyMin / 60));
 
-    // 4. Load AI Brief (with LocalStorage Caching)
-    const cachedBrief = localStorage.getItem('KIRA_MORNING_BRIEF_DATA');
-    const cachedBriefDate = localStorage.getItem('KIRA_MORNING_BRIEF_DATE');
+      // 6. Income this month
+      const startOfMonthStr = getStartOfMonth();
+      const { data: incomeData } = await supabase
+        .from('income_entries')
+        .select('amount')
+        .eq('user_id', user.id)
+        .gte('date', startOfMonthStr);
+      const totalIncome = incomeData?.reduce((sum, i) => sum + (i.amount || 0), 0) || 0;
+      setIncome(totalIncome);
 
-    if (cachedBrief && cachedBriefDate === todayStr) {
-      try {
-        setBrief(JSON.parse(cachedBrief));
-        setLoadingBrief(false);
-      } catch {
+      // 7. Load AI Brief
+      const cachedBrief = localStorage.getItem('KIRA_MORNING_BRIEF_DATA');
+      const cachedBriefDate = localStorage.getItem('KIRA_MORNING_BRIEF_DATE');
+
+      if (cachedBrief && cachedBriefDate === todayStr) {
+        try {
+          setBrief(JSON.parse(cachedBrief));
+          setLoadingBrief(false);
+        } catch {
+          generateAIBrief();
+        }
+      } else {
         generateAIBrief();
       }
-    } else {
-      generateAIBrief();
-    }
 
-    // 5. Generate Weekly XP Data from local xp logs
-    generateWeeklyXPChart();
+      // 8. Generate Weekly XP Data
+      generateWeeklyXPChart();
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const generateWeeklyXPChart = async () => {
+    if (!isSupabaseConfigured) return;
     try {
-      const xpLogs = await db.xp_log.where('created_at').aboveOrEqual(getDaysAgo(7)).toArray();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const sevenDaysAgoStr = getDaysAgo(7);
+      const { data: xpLogs } = await supabase
+        .from('xp_log')
+        .select('*')
+        .eq('user_id', user.id)
+        .gte('created_at', sevenDaysAgoStr);
       
-      // Group by day name
       const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
       const chartPoints = Array.from({ length: 7 }, (_, i) => {
         const d = new Date();
@@ -157,7 +288,7 @@ export function DashboardPage() {
         };
       });
 
-      xpLogs.forEach((log) => {
+      xpLogs?.forEach((log) => {
         if (log.created_at) {
           const logDateStr = log.created_at.split('T')[0];
           const point = chartPoints.find((cp) => cp.dateStr === logDateStr);
@@ -170,16 +301,7 @@ export function DashboardPage() {
       setWeeklyXPData(chartPoints.map((cp) => ({ day: cp.day, xp: cp.xp })));
     } catch (e) {
       console.error(e);
-      // Fallback data
-      setWeeklyXPData([
-        { day: 'Mon', xp: 20 },
-        { day: 'Tue', xp: 45 },
-        { day: 'Wed', xp: 30 },
-        { day: 'Thu', xp: 60 },
-        { day: 'Fri', xp: 25 },
-        { day: 'Sat', xp: 90 },
-        { day: 'Sun', xp: 40 },
-      ]);
+      setWeeklyXPData([]);
     }
   };
 
@@ -188,18 +310,37 @@ export function DashboardPage() {
     const todayStr = getToday();
 
     try {
-      // Gather stats context
-      const logs = await db.daily_logs.where('date').aboveOrEqual(getDaysAgo(7)).toArray();
-      const avgMood = logs.filter((l) => l.mood).reduce((sum, l) => sum + l.mood!, 0) / (logs.filter((l) => l.mood).length || 1);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const sevenDaysAgoStr = getDaysAgo(7);
+      const { data: logs } = await supabase
+        .from('daily_logs')
+        .select('*')
+        .eq('user_id', user.id)
+        .gte('date', sevenDaysAgoStr);
       
-      const habitsList = await db.habits.toArray();
-      const streaks = habitsList.map((h) => `${h.name}: ${h.streak || 0}d`).join(', ') || 'No active habits';
+      const avgMood = logs && logs.length > 0
+        ? logs.filter((l) => l.mood).reduce((sum, l) => sum + l.mood!, 0) / (logs.filter((l) => l.mood).length || 1)
+        : 3;
+      
+      const { data: habitsList } = await supabase
+        .from('habits')
+        .select('*')
+        .eq('user_id', user.id);
+      const streaks = habitsList?.map((h) => `${h.name}: ${h.streak || 0}d`).join(', ') || 'No active habits';
 
-      const goalsList = await db.goals.toArray();
-      const goalsSummary = goalsList.map((g) => `${g.name}: ${g.current_amount || 0}/${g.target_amount || 100}`).join(', ') || 'None';
+      const { data: goalsList } = await supabase
+        .from('goals')
+        .select('*')
+        .eq('user_id', user.id);
+      const goalsSummary = goalsList?.map((g) => `${g.name}: ${g.current_amount || 0}/${g.target_amount || 100}`).join(', ') || 'None';
 
-      const clientLeads = await db.income.toArray();
-      const pendingCount = clientLeads.filter((c) => c.status === 'Pending').length;
+      const { data: clientLeads } = await supabase
+        .from('leads')
+        .select('status')
+        .eq('user_id', user.id);
+      const pendingCount = clientLeads?.filter((c) => c.status !== 'Completed').length || 0;
 
       const systemPrompt = `You are Kira, a personal life coach. Give a morning brief in exactly this JSON format (no markdown, no other text):
 {
@@ -235,6 +376,76 @@ export function DashboardPage() {
     }
   };
 
+  const handleCompleteOnboarding = async () => {
+    if (!onboardingName.trim()) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      // 1. Save profile to Supabase
+      const { error: profileError } = await supabase.from('profiles').insert({
+        id: user.id,
+        display_name: onboardingName,
+        theme: 'system',
+      });
+      if (profileError) throw profileError;
+
+      // Update auth store profile state
+      useAuthStore.setState({
+        profile: {
+          display_name: onboardingName,
+          avatar_url: '',
+          theme: 'system',
+        },
+      });
+
+      // 2. Save goals if selected
+      if (selectedPresets.includes('camera')) {
+        await supabase.from('goals').insert({
+          user_id: user.id,
+          name: 'Camera Fund',
+          target_amount: 15000,
+          current_amount: 0,
+          category: 'Money',
+          color: '#6366f1',
+        });
+      }
+      if (selectedPresets.includes('travel')) {
+        await supabase.from('goals').insert({
+          user_id: user.id,
+          name: 'Travel Fund',
+          target_amount: 30000,
+          current_amount: 0,
+          category: 'Travel',
+          color: '#8b5cf6',
+        });
+      }
+
+      // 3. Save API key if provided
+      if (onboardingApiKey.trim()) {
+        localStorage.setItem('KIRA_GEMINI_KEY', onboardingApiKey.trim());
+        localStorage.setItem('KIRA_CLAUDE_KEY', onboardingApiKey.trim());
+      }
+
+      // 4. Trigger XP log for onboarding
+      await supabase.from('xp_log').insert({
+        user_id: user.id,
+        action: 'onboarding_completed',
+        xp: 50,
+      });
+
+      // Re-init XP
+      await useXPStore.getState().initXP();
+
+      showToast('Welcome to Kira! Onboarding complete.', 'success');
+      setShowOnboarding(false);
+      loadDashboardData();
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || 'Failed to complete onboarding', 'error');
+    }
+  };
+
   const displayName = profile?.display_name || 'there';
 
   return (
@@ -244,6 +455,149 @@ export function DashboardPage() {
       animate="visible"
       className="p-4 md:p-6 max-w-7xl mx-auto space-y-6"
     >
+      {/* Onboarding Overlay */}
+      <AnimatePresence>
+        {showOnboarding && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 max-w-md w-full space-y-6 shadow-2xl text-left"
+            >
+              {onboardingStep === 1 && (
+                <div className="space-y-4">
+                  <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary to-secondary flex items-center justify-center">
+                    <Sparkles className="text-white" size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">Welcome to Kira!</h3>
+                    <p className="text-xs text-zinc-400 mt-1">Let's get your profile set up. What is your name?</p>
+                  </div>
+                  <input
+                    type="text"
+                    value={onboardingName}
+                    onChange={(e) => setOnboardingName(e.target.value)}
+                    placeholder="Enter your name"
+                    className="w-full px-3 py-2.5 rounded-xl text-sm bg-zinc-950 border border-zinc-805 text-white focus:outline-none focus:border-primary"
+                    style={{ background: 'var(--bg-input)', border: '1px solid var(--border)' }}
+                  />
+                  <button
+                    onClick={() => {
+                      if (onboardingName.trim()) setOnboardingStep(2);
+                    }}
+                    disabled={!onboardingName.trim()}
+                    className="w-full py-2.5 bg-gradient-to-r from-primary to-secondary text-white font-semibold text-xs rounded-xl disabled:opacity-50"
+                  >
+                    Continue
+                  </button>
+                </div>
+              )}
+
+              {onboardingStep === 2 && (
+                <div className="space-y-4">
+                  <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary to-secondary flex items-center justify-center">
+                    <Target className="text-white" size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">Set Your First Goal</h3>
+                    <p className="text-xs text-zinc-400 mt-1">Select one or both preset goals to jumpstart your tracking, or skip to define your own later.</p>
+                  </div>
+                  <div className="space-y-2">
+                    <button
+                      onClick={() => {
+                        setSelectedPresets(prev =>
+                          prev.includes('camera') ? prev.filter(p => p !== 'camera') : [...prev, 'camera']
+                        );
+                      }}
+                      className="w-full p-3.5 rounded-xl border text-left flex items-center justify-between transition-colors"
+                      style={{
+                        borderColor: selectedPresets.includes('camera') ? 'var(--color-primary)' : 'var(--border)',
+                        background: selectedPresets.includes('camera') ? 'rgba(99, 102, 241, 0.1)' : 'transparent',
+                      }}
+                    >
+                      <div>
+                        <p className="text-xs font-semibold text-white">📷 Camera Fund</p>
+                        <p className="text-[10px] text-zinc-500 mt-0.5">Target: ₹15,000</p>
+                      </div>
+                      <div className="w-4 h-4 rounded border flex items-center justify-center border-zinc-700">
+                        {selectedPresets.includes('camera') && <div className="w-2.5 h-2.5 bg-indigo-500 rounded-sm" />}
+                      </div>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setSelectedPresets(prev =>
+                          prev.includes('travel') ? prev.filter(p => p !== 'travel') : [...prev, 'travel']
+                        );
+                      }}
+                      className="w-full p-3.5 rounded-xl border text-left flex items-center justify-between transition-colors"
+                      style={{
+                        borderColor: selectedPresets.includes('travel') ? 'var(--color-primary)' : 'var(--border)',
+                        background: selectedPresets.includes('travel') ? 'rgba(99, 102, 241, 0.1)' : 'transparent',
+                      }}
+                    >
+                      <div>
+                        <p className="text-xs font-semibold text-white">✈️ Travel Fund</p>
+                        <p className="text-[10px] text-zinc-500 mt-0.5">Target: ₹30,000</p>
+                      </div>
+                      <div className="w-4 h-4 rounded border flex items-center justify-center border-zinc-700">
+                        {selectedPresets.includes('travel') && <div className="w-2.5 h-2.5 bg-indigo-500 rounded-sm" />}
+                      </div>
+                    </button>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setOnboardingStep(3)}
+                      className="flex-1 py-2.5 border border-zinc-800 bg-zinc-900 text-zinc-300 text-xs font-semibold rounded-xl"
+                    >
+                      Skip
+                    </button>
+                    <button
+                      onClick={() => setOnboardingStep(3)}
+                      className="flex-1 py-2.5 bg-gradient-to-r from-primary to-secondary text-white font-semibold text-xs rounded-xl"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {onboardingStep === 3 && (
+                <div className="space-y-4">
+                  <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary to-secondary flex items-center justify-center">
+                    <Info className="text-white" size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">Unlock AI Coach Features</h3>
+                    <p className="text-xs text-zinc-400 mt-1">
+                      Kira uses Gemini for coaching, planning, and journal reflections. Add your Gemini API key (optional). You can get one from{' '}
+                      <a href="https://aistudio.google.com" target="_blank" rel="noreferrer" className="text-primary hover:underline font-semibold">
+                        Google AI Studio
+                      </a>.
+                    </p>
+                  </div>
+                  <input
+                    type="password"
+                    value={onboardingApiKey}
+                    onChange={(e) => setOnboardingApiKey(e.target.value)}
+                    placeholder="AIzaSy..."
+                    className="w-full px-3 py-2.5 rounded-xl text-sm bg-zinc-950 border border-zinc-800 text-white focus:outline-none focus:border-primary"
+                    style={{ background: 'var(--bg-input)', border: '1px solid var(--border)' }}
+                  />
+                  <button
+                    onClick={handleCompleteOnboarding}
+                    className="w-full py-2.5 bg-gradient-to-r from-primary to-secondary text-white font-semibold text-xs rounded-xl"
+                  >
+                    Finish Onboarding
+                  </button>
+                </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Hero Greeting Panel */}
       <motion.div
         variants={itemVariants}
@@ -389,36 +743,42 @@ export function DashboardPage() {
       {/* Goals Progress */}
       <motion.div variants={itemVariants}>
         <h3 className="text-sm font-bold mb-3" style={{ color: 'var(--text)' }}>Goal Progress</h3>
-        <div className="flex gap-4 overflow-x-auto pb-2 md:grid md:grid-cols-2 md:overflow-visible">
-          {goals.map((goal) => {
-            const progress = (goal.current / goal.target) * 100;
-            return (
-              <motion.div
-                key={goal.name}
-                whileHover={{ scale: 1.02 }}
-                className="min-w-[260px] md:min-w-0 rounded-2xl p-5 flex items-center gap-5"
-                style={{
-                  background: 'var(--bg-card)',
-                  border: '1px solid var(--border)',
-                  boxShadow: 'var(--shadow-sm)',
-                }}
-              >
-                <ProgressRing progress={progress} size={80} strokeWidth={6} color={goal.color}>
-                  <span className="text-xl">{goal.icon}</span>
-                </ProgressRing>
-                <div>
-                  <p className="text-sm font-semibold text-zinc-300">{goal.name}</p>
-                  <p className="text-lg font-black" style={{ color: 'var(--text)' }}>
-                    {formatCurrency(goal.current)}
-                  </p>
-                  <p className="text-[10px] text-zinc-500">
-                    of {formatCurrency(goal.target)} ({Math.round(progress)}%)
-                  </p>
-                </div>
-              </motion.div>
-            );
-          })}
-        </div>
+        {goals.length > 0 ? (
+          <div className="flex gap-4 overflow-x-auto pb-2 md:grid md:grid-cols-2 md:overflow-visible">
+            {goals.map((goal) => {
+              const progress = (goal.current / goal.target) * 100;
+              return (
+                <motion.div
+                  key={goal.name}
+                  whileHover={{ scale: 1.02 }}
+                  className="min-w-[260px] md:min-w-0 rounded-2xl p-5 flex items-center gap-5"
+                  style={{
+                    background: 'var(--bg-card)',
+                    border: '1px solid var(--border)',
+                    boxShadow: 'var(--shadow-sm)',
+                  }}
+                >
+                  <ProgressRing progress={progress} size={80} strokeWidth={6} color={goal.color}>
+                    <span className="text-xl">{goal.icon}</span>
+                  </ProgressRing>
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-300">{goal.name}</p>
+                    <p className="text-lg font-black" style={{ color: 'var(--text)' }}>
+                      {formatCurrency(goal.current)}
+                    </p>
+                    <p className="text-[10px] text-zinc-500">
+                      of {formatCurrency(goal.target)} ({Math.round(progress)}%)
+                    </p>
+                  </div>
+                </motion.div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="rounded-2xl p-6 text-center border border-dashed border-zinc-800 bg-zinc-900/20 text-xs text-zinc-500">
+            No goals yet — add your first goal in Life Tracker
+          </div>
+        )}
       </motion.div>
 
       {/* Gamification Chart (Weekly XP Graph) */}

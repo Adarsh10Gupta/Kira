@@ -7,8 +7,9 @@ import { useXPStore } from '@/stores/xpStore';
 import { useDynamicSectionsStore, type DynamicSectionConfig } from '@/stores/dynamicSectionsStore';
 import { useToastStore } from '@/stores/toastStore';
 import { callClaude } from '@/lib/claude';
-import { SkeletonChat } from '@/components/ui/Skeleton';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { db } from '@/lib/db';
 
 interface Message {
   id: string;
@@ -41,9 +42,8 @@ export function CoachPage() {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  
-  // Custom Section Builder states
   const [buildingSectionName, setBuildingSectionName] = useState<string | null>(null);
+  const [systemPrompt, setSystemPrompt] = useState('');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -63,12 +63,114 @@ export function CoachPage() {
     }
   }, [input]);
 
+  useEffect(() => {
+    buildDynamicSystemPrompt();
+  }, [profile]);
+
+  useEffect(() => {
+    loadChatMessages();
+  }, []);
+
+  async function loadChatMessages() {
+    let loadedMessages: Message[] = [];
+    if (isSupabaseConfigured) {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const { data } = await supabase
+            .from('chat_messages')
+            .select('*')
+            .eq('user_id', user.id)
+            .order('created_at', { ascending: true });
+
+          if (data && data.length > 0) {
+            loadedMessages = data.map((m: any) => ({
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              created_at: m.created_at,
+              buildIntent: m.build_intent ? (typeof m.build_intent === 'string' ? JSON.parse(m.build_intent) : m.build_intent) : undefined
+            }));
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load chat history from Supabase:', e);
+      }
+    }
+
+    if (loadedMessages.length === 0) {
+      try {
+        const localMsgs = await db.chat_messages.orderBy('created_at').toArray();
+        if (localMsgs && localMsgs.length > 0) {
+          loadedMessages = localMsgs.map((m: any) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            created_at: m.created_at,
+            buildIntent: undefined
+          }));
+        }
+      } catch (e) {
+        console.error('Failed to load local chat history:', e);
+      }
+    }
+
+    setMessages(loadedMessages);
+  }
+
   const displayName = profile?.display_name || 'User';
 
-  const systemPrompt = `You are Kira, a personal AI life coach and guide for this user. You are talking to ${displayName}.
+  async function buildDynamicSystemPrompt() {
+    const defaultPrompt = `You are Kira, a personal AI life coach and guide for this user. You are talking to ${displayName}.
+Your personality: warm, direct, motivating. Smart, expert coaching. Give concrete advice, not vague motivation. Be concise. Use bullet points when listing steps. Ask one follow-up question at the end of each response if relevant.
+
+You have special abilities:
+1. NORMAL COACHING: Answer questions, give advice, track progress.
+2. BUILD SECTION: If the user mentions wanting to prepare for an exam (e.g. GATE), track a new goal area, or add/build a new tracker/section, you must respond with a special JSON block wrapped in <BUILD_SECTION> tags in addition to explaining what you will build:
+<BUILD_SECTION>
+{"intent": "gate_prep", "title": "GATE Preparation", "description": "Full GATE CS preparation tracker"}
+</BUILD_SECTION>
+
+3. LOG ACTION: If user says they completed something trackable (e.g. studied for 2 hours, drank water, completed a habit), wrap a log action in <LOG_ACTION> tags:
+<LOG_ACTION>
+{"type": "habit_done"|"study_session"|"goal_update"|"income_log", "data": {"minutes": 120, "topic": "ML"}}
+</LOG_ACTION>`;
+
+    if (!isSupabaseConfigured) {
+      setSystemPrompt(defaultPrompt);
+      return;
+    }
+
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        setSystemPrompt(defaultPrompt);
+        return;
+      }
+
+      // Fetch goals
+      const { data: goalsData } = await supabase
+        .from('goals')
+        .select('name, target_amount, current_amount')
+        .eq('user_id', user.id);
+      
+      const goalsStr = goalsData && goalsData.length > 0
+        ? goalsData.map((g) => `${g.name} (target: ₹${g.target_amount}, current: ₹${g.current_amount})`).join(', ')
+        : 'No active goals';
+
+      // Fetch habits
+      const { data: habitsData } = await supabase
+        .from('habits')
+        .select('name, streak')
+        .eq('user_id', user.id);
+      const habitsStr = habitsData && habitsData.length > 0
+        ? habitsData.map((h) => `${h.name} (${h.streak || 0}d streak)`).join(', ')
+        : 'No habits configured';
+
+      const prompt = `You are Kira, a personal AI life coach and guide for this user. You are talking to ${displayName}.
 You know their context:
-- Goals: earning money for a camera (₹15,000) and travel fund (₹30,000)
-- Current focus: building websites for Instagram pages, learning ML/AI
+- Goals: ${goalsStr}
+- Habits: ${habitsStr}
 - Personal growth: self-improvement, discipline, consistency
 - You track their daily mood, study hours, diet, habits, and income
 
@@ -86,6 +188,13 @@ You have special abilities:
 {"type": "habit_done"|"study_session"|"goal_update"|"income_log", "data": {"minutes": 120, "topic": "ML"}}
 </LOG_ACTION>`;
 
+      setSystemPrompt(prompt);
+    } catch (e) {
+      console.error(e);
+      setSystemPrompt(defaultPrompt);
+    }
+  };
+
   const sendMessage = async (content: string) => {
     if (!content.trim()) return;
 
@@ -100,13 +209,45 @@ You have special abilities:
     setInput('');
     setIsTyping(true);
 
+    let userId = 'demo-user';
+    if (isSupabaseConfigured) {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          userId = user.id;
+          await supabase.from('chat_messages').insert({
+            id: userMessage.id,
+            user_id: userId,
+            role: userMessage.role,
+            content: userMessage.content,
+            created_at: userMessage.created_at,
+          });
+        }
+      } catch (e) {
+        console.error('Failed to save user message to Supabase:', e);
+      }
+    }
+
+    try {
+      await db.chat_messages.put({
+        id: userMessage.id,
+        user_id: userId,
+        role: userMessage.role,
+        content: userMessage.content,
+        created_at: userMessage.created_at,
+        synced: isSupabaseConfigured,
+      });
+    } catch (e) {
+      console.error('Failed to save user message locally:', e);
+    }
+
     try {
       const contextMessages = [...messages, userMessage].slice(-20).map((m) => ({
         role: m.role as 'user' | 'assistant',
         content: m.content,
       }));
 
-      const response = await callClaude(systemPrompt, contextMessages);
+      const response = await callClaude(systemPrompt || `You are Kira, a personal AI life coach.`, contextMessages);
 
       // Parse tags
       const buildRegex = /<BUILD_SECTION>([\s\S]*?)<\/BUILD_SECTION>/;
@@ -143,6 +284,37 @@ You have special abilities:
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
+
+      if (isSupabaseConfigured) {
+        try {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user) {
+            await supabase.from('chat_messages').insert({
+              id: assistantMessage.id,
+              user_id: user.id,
+              role: assistantMessage.role,
+              content: assistantMessage.content,
+              created_at: assistantMessage.created_at,
+              build_intent: buildIntent ? JSON.stringify(buildIntent) : null,
+            });
+          }
+        } catch (e) {
+          console.error('Failed to save assistant message to Supabase:', e);
+        }
+      }
+
+      try {
+        await db.chat_messages.put({
+          id: assistantMessage.id,
+          user_id: userId,
+          role: assistantMessage.role,
+          content: assistantMessage.content,
+          created_at: assistantMessage.created_at,
+          synced: isSupabaseConfigured,
+        });
+      } catch (e) {
+        console.error('Failed to save assistant message locally:', e);
+      }
     } catch {
       const errorMessage: Message = {
         id: crypto.randomUUID(),
@@ -178,11 +350,9 @@ You have special abilities:
     showToast(`✓ Logged action! +${xpPoints} XP`, 'success');
   };
 
-  // Trigger building dynamic section config via Claude
   const triggerBuildSection = async (intent: string, title: string, description: string, msgId: string) => {
     setBuildingSectionName(title);
     
-    // Hide intent card from list
     setMessages((prev) => 
       prev.map((m) => m.id === msgId ? { ...m, buildIntent: undefined } : m)
     );
@@ -252,8 +422,21 @@ Otherwise use your knowledge to pre-populate relevant, extensive contents.`;
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const clearChat = () => {
+  const clearChat = async () => {
     setMessages([]);
+    try {
+      await db.chat_messages.clear();
+      if (isSupabaseConfigured) {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          await supabase.from('chat_messages').delete().eq('user_id', user.id);
+        }
+      }
+      showToast('Chat history cleared!', 'info');
+    } catch (e) {
+      console.error('Failed to clear chat history:', e);
+      showToast('Failed to clear chat history', 'error');
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -265,7 +448,6 @@ Otherwise use your knowledge to pre-populate relevant, extensive contents.`;
 
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)] md:h-[calc(100vh-4rem)] relative">
-      {/* Loading overlay for dynamic page construction */}
       {buildingSectionName && (
         <div className="absolute inset-0 bg-zinc-950/80 backdrop-blur-md z-50 flex flex-col items-center justify-center gap-4 text-center">
           <Loader2 className="animate-spin text-primary" size={36} />
@@ -357,7 +539,6 @@ Otherwise use your knowledge to pre-populate relevant, extensive contents.`;
                     >
                       <div className="whitespace-pre-wrap">{message.content}</div>
 
-                      {/* Copy button */}
                       <button
                         onClick={() => copyMessage(message.id, message.content)}
                         className={`absolute -bottom-3 ${
@@ -374,7 +555,6 @@ Otherwise use your knowledge to pre-populate relevant, extensive contents.`;
                     </div>
                   </motion.div>
 
-                  {/* AI-Generated custom section prompt block card */}
                   {message.role === 'assistant' && message.buildIntent && (
                     <motion.div
                       initial={{ opacity: 0, scale: 0.95 }}
@@ -385,7 +565,7 @@ Otherwise use your knowledge to pre-populate relevant, extensive contents.`;
                         <Sparkles size={14} className="text-primary animate-pulse" />
                         Shall I construct the custom tabbed section: <b>{message.buildIntent.title}</b>?
                       </p>
-                      <p className="text-[11px] text-zinc-500 leading-normal">{message.buildIntent.description}</p>
+                      <p className="text-[11px] text-zinc-505 leading-normal" style={{ color: 'var(--text-muted)' }}>{message.buildIntent.description}</p>
                       
                       <div className="flex gap-2">
                         <button

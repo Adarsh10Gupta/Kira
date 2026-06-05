@@ -1,15 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
-  BookOpen, Calendar, Sparkles, Check, Loader2, ArrowRight, LineChart as ChartIcon, 
-  ChevronLeft, ChevronRight, HelpCircle, HeartHandshake
+  BookOpen, Sparkles, Loader2, LineChart as ChartIcon, HeartHandshake
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { useXPStore } from '@/stores/xpStore';
 import { useToastStore } from '@/stores/toastStore';
 import { callClaude } from '@/lib/claude';
-import { getToday, formatDate } from '@/lib/utils';
-import { db } from '@/lib/db';
+import { getToday } from '@/lib/utils';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 
 interface MoodPoint {
@@ -45,91 +43,72 @@ export function JournalPage() {
   }, []);
 
   const loadJournalEntry = async () => {
+    if (!isSupabaseConfigured) return;
     setLoading(true);
     setContent('');
     setAiReflection('');
     
-    let fetchedContent = '';
-    let fetchedReflection = '';
-
-    if (isSupabaseConfigured) {
-      try {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
         const { data } = await supabase
           .from('journal_entries')
           .select('content, ai_reflection')
+          .eq('user_id', user.id)
           .eq('date', date)
-          .single();
-        if (data) {
-          fetchedContent = data.content || '';
-          fetchedReflection = data.ai_reflection || '';
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    }
+          .maybeSingle();
 
-    try {
-      const local = await db.journal_entries.where({ date }).first();
-      if (!fetchedContent && local) {
-        fetchedContent = local.content;
-        fetchedReflection = local.ai_reflection || '';
+        if (data) {
+          setContent(data.content || '');
+          setAiReflection(data.ai_reflection || '');
+        }
       }
     } catch (err) {
       console.error(err);
+    } finally {
+      setLoading(false);
     }
-
-    setContent(fetchedContent);
-    setAiReflection(fetchedReflection);
-    setLoading(false);
   };
 
   const loadMoodTimeline = async () => {
+    if (!isSupabaseConfigured) return;
     try {
-      const logs = await db.daily_logs.orderBy('date').toArray();
-      const points = logs
-        .filter((l) => l.mood !== undefined && l.mood > 0)
-        .slice(-14) // Last 14 logs
-        .map((l) => ({
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data } = await supabase
+        .from('daily_logs')
+        .select('date, mood')
+        .eq('user_id', user.id)
+        .gt('mood', 0)
+        .order('date', { ascending: true })
+        .limit(14);
+
+      if (data) {
+        const points = data.map((l) => ({
           date: l.date,
           formattedDate: new Date(l.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }),
           mood: l.mood || 0,
         }));
-      setMoodHistory(points);
+        setMoodHistory(points);
+      }
     } catch (e) {
       console.error(e);
     }
   };
 
   const saveJournalEntry = async (updatedContent = content, updatedReflection = aiReflection) => {
-    let userId = 'demo-user';
-    
-    if (isSupabaseConfigured) {
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
-          userId = user.id;
-          await supabase.from('journal_entries').upsert({
-            user_id: userId,
-            date,
-            content: updatedContent,
-            ai_reflection: updatedReflection,
-          });
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    }
-
+    if (!isSupabaseConfigured) return;
     try {
-      const existing = await db.journal_entries.where({ date }).first();
-      await db.journal_entries.put({
-        id: existing?.id || undefined,
-        user_id: userId,
-        date,
-        content: updatedContent,
-        ai_reflection: updatedReflection,
-        synced: isSupabaseConfigured,
-      });
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        await supabase.from('journal_entries').upsert({
+          user_id: user.id,
+          date,
+          content: updatedContent,
+          ai_reflection: updatedReflection,
+        }, { onConflict: 'user_id,date' });
+      }
     } catch (err) {
       console.error(err);
     }
@@ -186,7 +165,7 @@ export function JournalPage() {
     }
   };
 
-  // Reflect with Claude
+  // Reflect with Claude (Gemini)
   const reflectWithKira = async () => {
     if (!content.trim()) {
       showToast('Write down your thoughts first!', 'warning');
@@ -194,26 +173,35 @@ export function JournalPage() {
     }
 
     setReflectLoading(true);
-    const systemPrompt = `You are Kira, a personal life coach. You read the user's journal entry and help them reflect. Respond with exactly a JSON object containing: { "questions": ["Question 1", "Question 2", "Question 3"], "affirmation": "One powerful, personalized affirmation" }. No other text.`;
+    const systemPrompt = `You are a compassionate life coach and journaling guide. 
+Read the journal entry and respond with:
+1. Three deep, thoughtful questions to help the person reflect further
+2. One genuine affirmation based on what they shared
+Keep your response warm, personal, and concise.`;
 
     try {
-      const response = await callClaude(systemPrompt, [{ role: 'user', content }]);
-      const cleaned = response.replace(/```json/g, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(cleaned);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-      if (parsed.questions && parsed.affirmation) {
-        // Format reflection as Markdown list
-        const reflectionString = `### Reflections\n${parsed.questions.map((q: string) => `- ${q}`).join('\n')}\n\n### Affirmation\n> **${parsed.affirmation}**`;
-        setAiReflection(reflectionString);
-        await saveJournalEntry(content, reflectionString);
-        awardXP('Generated journal AI reflection', 20);
-        showToast('Reflection generated! +20 XP', 'success');
-      } else {
-        showToast('Failed to parse reflection data.', 'error');
-      }
-    } catch (e) {
+      const response = await callClaude(systemPrompt, [
+        { role: 'user', content }
+      ], 600);
+
+      // Save reflection to Supabase
+      const { error } = await supabase
+        .from('journal_entries')
+        .update({ ai_reflection: response })
+        .eq('user_id', user.id)
+        .eq('date', date);
+
+      if (error) throw error;
+
+      setAiReflection(response);
+      await awardXP('journal_reflection_generated', 20);
+      showToast('Reflection generated! +20 XP', 'success');
+    } catch (e: any) {
       console.error(e);
-      showToast('Claude reflection failed. Check API key.', 'error');
+      showToast(e.message || 'Claude reflection failed. Check API key.', 'error');
     } finally {
       setReflectLoading(false);
     }
@@ -221,32 +209,40 @@ export function JournalPage() {
 
   // Monthly Summary
   const generateMonthlySummary = async () => {
+    if (!isSupabaseConfigured) return;
     setSummaryLoading(true);
     setMonthlySummary('');
 
-    // Fetch all journal entries from this month
     try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        setSummaryLoading(false);
+        return;
+      }
+
       const now = new Date(date);
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
       const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
       
-      const localEntries = await db.journal_entries
-        .where('date')
-        .between(startOfMonth, endOfMonth, true, true)
-        .toArray();
+      const { data: supabaseEntries } = await supabase
+        .from('journal_entries')
+        .select('*')
+        .eq('user_id', user.id)
+        .gte('date', startOfMonth)
+        .lte('date', endOfMonth);
       
-      if (localEntries.length === 0) {
+      if (!supabaseEntries || supabaseEntries.length === 0) {
         showToast('No entries recorded for this month.', 'warning');
         setSummaryLoading(false);
         return;
       }
 
-      const consolidatedText = localEntries.map((e) => `Date: ${e.date}\nEntry: ${e.content}`).join('\n\n');
+      const consolidatedText = supabaseEntries.map((e) => `Date: ${e.date}\nEntry: ${e.content}`).join('\n\n');
       const systemPrompt = `You are Kira, an AI life coach. Summarize the user's past month of journal entries. Highlight key themes, general mood patterns, progress made, and one piece of coaching guidance. Keep it within 3 short paragraphs.`;
 
       const summary = await callClaude(systemPrompt, [{ role: 'user', content: consolidatedText }]);
       setMonthlySummary(summary);
-      awardXP('Summarized monthly logs', 25);
+      await awardXP('journal_monthly_summary', 25);
       showToast('Summary completed! +25 XP', 'success');
     } catch (e) {
       console.error(e);
@@ -305,7 +301,7 @@ export function JournalPage() {
                 />
 
                 <div className="flex justify-between items-center pt-2">
-                  <span className="text-[10px] text-zinc-500 font-medium">Auto-saved locally</span>
+                  <span className="text-[10px] text-zinc-500 font-medium">Auto-saved to cloud</span>
                   <button
                     onClick={reflectWithKira}
                     disabled={reflectLoading || !content.trim()}
@@ -333,16 +329,15 @@ export function JournalPage() {
                   <HeartHandshake size={14} /> Coach Reflection questions
                 </h4>
                 <div className="text-xs leading-relaxed space-y-3 prose prose-invert text-zinc-300">
-                  {/* Clean styling for reflection output */}
                   {aiReflection.split('\n').map((line, i) => {
                     if (line.startsWith('###')) {
                       return <h5 key={i} className="text-xs font-semibold text-white mt-3 mb-1 first:mt-0">{line.replace('###', '').trim()}</h5>;
                     }
-                    if (line.startsWith('-')) {
+                    if (line.startsWith('-') || line.match(/^\d+\./)) {
                       return (
                         <p key={i} className="flex gap-2 items-start pl-2">
                           <span className="text-primary font-bold">?</span>
-                          <span>{line.replace('-', '').trim()}</span>
+                          <span>{line.replace(/^-\s*/, '').replace(/^\d+\.\s*/, '').trim()}</span>
                         </p>
                       );
                     }
@@ -389,7 +384,7 @@ export function JournalPage() {
             ) : (
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <span className="text-xl mb-1">📈</span>
-                <p className="text-xs text-zinc-500">Record daily logs to plot your mood trends here.</p>
+                <p className="text-xs text-zinc-505" style={{ color: 'var(--text-muted)' }}>Record daily logs to plot your mood trends here.</p>
               </div>
             )}
           </div>
@@ -401,6 +396,7 @@ export function JournalPage() {
               onClick={generateMonthlySummary}
               disabled={summaryLoading}
               className="w-full py-2 border border-zinc-800 bg-zinc-900/60 hover:bg-zinc-850 text-zinc-300 font-semibold text-xs rounded-xl flex items-center justify-center gap-1.5"
+              style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text)' }}
             >
               {summaryLoading ? <Loader2 className="animate-spin" size={14} /> : <BookOpen size={14} />}
               Summarize Month's Entries
@@ -412,6 +408,7 @@ export function JournalPage() {
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: 'auto' }}
                   className="p-3 bg-zinc-900/40 border border-zinc-855 rounded-xl text-xs leading-relaxed text-zinc-300 mt-2 whitespace-pre-wrap"
+                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text)' }}
                 >
                   {monthlySummary}
                 </motion.div>

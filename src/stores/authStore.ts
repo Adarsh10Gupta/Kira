@@ -43,7 +43,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       .from('profiles')
       .select('*')
       .eq('id', user.id)
-      .single();
+      .maybeSingle();
 
     if (data) {
       set({
@@ -54,20 +54,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         },
       });
     } else {
-      // Create profile if it doesn't exist
-      const displayName = user.user_metadata?.full_name || user.email?.split('@')[0] || 'User';
-      await supabase.from('profiles').upsert({
-        id: user.id,
-        display_name: displayName,
-        theme: 'system',
-      });
-      set({
-        profile: {
-          display_name: displayName,
-          avatar_url: '',
-          theme: 'system',
-        },
-      });
+      set({ profile: null });
     }
   },
 }));

@@ -1,12 +1,15 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Sparkles, Copy, RefreshCw, Save, Check, Trash2, ExternalLink, Loader2 } from 'lucide-react';
+import { Sparkles, Copy, RefreshCw, Save, Check, Trash2, Loader2 } from 'lucide-react';
 import { callClaude } from '@/lib/claude';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { formatDate } from '@/lib/utils';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { useXPStore } from '@/stores/xpStore';
+import { useToastStore } from '@/stores/toastStore';
 
 const pitchSchema = z.object({
   pageUrl: z.string().min(1, 'Please enter a page URL or description'),
@@ -81,10 +84,51 @@ export function PitchPage() {
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [expandedPitch, setExpandedPitch] = useState<string | null>(null);
 
+  const { awardXP } = useXPStore();
+  const { showToast } = useToastStore();
+
   const form = useForm<PitchFormData>({
     resolver: zodResolver(pitchSchema),
     defaultValues: { serviceType: '', budget: '' },
   });
+
+  useEffect(() => {
+    loadSavedPitches();
+  }, []);
+
+  const loadSavedPitches = async () => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data } = await supabase
+        .from('pitches')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
+
+      if (data) {
+        setSavedPitches(data.map((p) => {
+          let parsedPitch: PitchResult = { main: '', subjectLine: '', followUps: [], talkingPoints: [] };
+          try {
+            parsedPitch = JSON.parse(p.pitch_content);
+          } catch (e) {
+            parsedPitch = { main: p.pitch_content, subjectLine: '', followUps: [], talkingPoints: [] };
+          }
+          return {
+            id: p.id,
+            pageName: p.page_name,
+            serviceType: p.service_type,
+            date: p.created_at,
+            pitch: parsedPitch,
+          };
+        }));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   const copyText = async (text: string, field: string) => {
     await navigator.clipboard.writeText(text);
@@ -92,16 +136,17 @@ export function PitchPage() {
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  const generatePitch = async (data: PitchFormData) => {
+  const generatePitch = async (formData: PitchFormData) => {
     setGenerating(true);
     setResult(null);
 
+    const systemPrompt = 'You output only valid JSON, no markdown, no other text.';
     const prompt = `You are a professional freelance web designer's outreach assistant. The user wants to pitch website services to an Instagram page.
 
-Page info: ${data.pageUrl}
-Extra context: ${data.context || 'None provided'}
-Service type: ${data.serviceType}
-Budget range: ${data.budget}
+Page info: ${formData.pageUrl}
+Extra context: ${formData.context || 'None provided'}
+Service type: ${formData.serviceType}
+Budget range: ${formData.budget}
 
 Write a highly personalised, professional outreach message they can send via Instagram DM or email.
 
@@ -124,36 +169,79 @@ Respond in this exact JSON format:
 Only output valid JSON, nothing else.`;
 
     try {
-      const response = await callClaude('You output only valid JSON, no markdown.', [
+      const response = await callClaude(systemPrompt, [
         { role: 'user', content: prompt },
       ]);
 
       const parsed = JSON.parse(response) as PitchResult;
       setResult(parsed);
       setActiveTab('main');
-    } catch {
+
+      // Save to Supabase immediately and award XP
+      if (isSupabaseConfigured) {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const { data: insertedPitch, error } = await supabase
+            .from('pitches')
+            .insert({
+              user_id: user.id,
+              page_name: formData.pageUrl.slice(0, 50),
+              pitch_content: response,
+              service_type: formData.serviceType,
+              budget_range: formData.budget,
+              created_at: new Date().toISOString(),
+            })
+            .select()
+            .single();
+
+          if (!error && insertedPitch) {
+            setSavedPitches((prev) => [
+              {
+                id: insertedPitch.id,
+                pageName: insertedPitch.page_name,
+                serviceType: insertedPitch.service_type,
+                date: insertedPitch.created_at,
+                pitch: parsed,
+              },
+              ...prev,
+            ]);
+          }
+          await awardXP('pitch_generated', 10);
+          showToast('Pitch generated and saved! +10 XP', 'success');
+        }
+      }
+    } catch (err: any) {
+      console.error(err);
       setResult({
-        main: 'Failed to generate pitch. Please check your API key and try again.',
+        main: 'Failed to generate pitch: ' + (err.message || 'Please check your API key and try again.'),
         subjectLine: '',
         followUps: [],
         talkingPoints: [],
       });
+      showToast('Generation failed', 'error');
     } finally {
       setGenerating(false);
     }
   };
 
+  const deletePitch = async (id: string) => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { error } = await supabase
+        .from('pitches')
+        .delete()
+        .eq('id', id);
+      if (error) throw error;
+      setSavedPitches((prev) => prev.filter((p) => p.id !== id));
+      showToast('Pitch deleted', 'info');
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to delete pitch', 'error');
+    }
+  };
+
   const savePitch = () => {
-    if (!result) return;
-    const data = form.getValues();
-    const pitch: SavedPitch = {
-      id: crypto.randomUUID(),
-      pageName: data.pageUrl.slice(0, 50),
-      serviceType: data.serviceType,
-      date: new Date().toISOString(),
-      pitch: result,
-    };
-    setSavedPitches((prev) => [pitch, ...prev]);
+    showToast('Pitch is already saved to your history!', 'success');
   };
 
   return (
@@ -299,11 +387,11 @@ Only output valid JSON, nothing else.`;
             />
           ) : generating ? (
             <div className="space-y-3 animate-pulse">
-              <div className="skeleton h-4 w-3/4" />
-              <div className="skeleton h-4 w-full" />
-              <div className="skeleton h-4 w-2/3" />
-              <div className="skeleton h-4 w-5/6" />
-              <div className="skeleton h-4 w-1/2" />
+              <div className="skeleton h-4 w-3/4 animate-pulse rounded bg-zinc-800" />
+              <div className="skeleton h-4 w-full animate-pulse rounded bg-zinc-800" />
+              <div className="skeleton h-4 w-2/3 animate-pulse rounded bg-zinc-800" />
+              <div className="skeleton h-4 w-5/6 animate-pulse rounded bg-zinc-800" />
+              <div className="skeleton h-4 w-1/2 animate-pulse rounded bg-zinc-800" />
             </div>
           ) : result ? (
             <>
@@ -447,7 +535,7 @@ Only output valid JSON, nothing else.`;
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        setSavedPitches((prev) => prev.filter((p) => p.id !== pitch.id));
+                        deletePitch(pitch.id);
                       }}
                       className="p-1.5 rounded-lg hover:bg-[var(--bg-input)]"
                       style={{ color: 'var(--text-muted)' }}

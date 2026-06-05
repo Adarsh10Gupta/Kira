@@ -1,9 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Calendar, Target, IndianRupee, Zap,
-  Plus, Trash2, Edit3, Check, X,
-  Dumbbell,
+  Plus, Trash2, Check, X
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -11,8 +10,11 @@ import {
 import { ProgressRing } from '@/components/ui/ProgressRing';
 import { EmptyState } from '@/components/ui/EmptyState';
 import {
-  formatCurrency, formatDate, getToday, getMoodEmoji, getMoodLabel,
+  formatCurrency, formatDate, getToday, getMoodEmoji, getMoodLabel, getDaysAgo
 } from '@/lib/utils';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { useXPStore } from '@/stores/xpStore';
+import { useToastStore } from '@/stores/toastStore';
 
 type TrackerTab = 'daily' | 'goals' | 'income' | 'habits';
 
@@ -42,7 +44,6 @@ interface Habit {
   category: string;
   icon: string;
   streak: number;
-  completions: string[];
 }
 
 const tabConfig: { key: TrackerTab; label: string; icon: typeof Calendar }[] = [
@@ -111,10 +112,91 @@ function DailyLogTab() {
   const [oneImprove, setOneImprove] = useState('');
   const [gratitude, setGratitude] = useState('');
   const [saved, setSaved] = useState(false);
+  
+  const { awardXP } = useXPStore();
+  const { showToast } = useToastStore();
 
-  const handleSave = () => {
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+  useEffect(() => {
+    loadDailyLog();
+  }, [date]);
+
+  async function loadDailyLog() {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data } = await supabase
+        .from('daily_logs')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('date', date)
+        .maybeSingle();
+
+      if (data) {
+        setMood(data.mood || 0);
+        setEnergy(data.energy || 5);
+        setSleepHours(data.sleep_hours ? String(data.sleep_hours) : '');
+        setWaterGlasses(data.water_glasses || 0);
+        setMeals(data.meals || { breakfast: false, lunch: false, dinner: false, snacks: false });
+        setExerciseEnabled(Boolean(data.exercise_minutes));
+        setExerciseMinutes(data.exercise_minutes ? String(data.exercise_minutes) : '');
+        setStudyMinutes(data.study_minutes ? String(data.study_minutes) : '');
+        setStudyTopic(data.study_topic || '');
+        setOneWin(data.one_win || '');
+        setOneImprove(data.one_improve || '');
+        setGratitude(data.gratitude || '');
+      } else {
+        setMood(0);
+        setEnergy(5);
+        setSleepHours('');
+        setWaterGlasses(0);
+        setMeals({ breakfast: false, lunch: false, dinner: false, snacks: false });
+        setExerciseEnabled(false);
+        setExerciseMinutes('');
+        setStudyMinutes('');
+        setStudyTopic('');
+        setOneWin('');
+        setOneImprove('');
+        setGratitude('');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { error } = await supabase.from('daily_logs').upsert({
+        user_id: user.id,
+        date,
+        mood,
+        energy,
+        sleep_hours: sleepHours ? Number(sleepHours) : null,
+        water_glasses: waterGlasses,
+        meals,
+        exercise_minutes: exerciseEnabled && exerciseMinutes ? Number(exerciseMinutes) : null,
+        study_minutes: studyMinutes ? Number(studyMinutes) : null,
+        study_topic: studyTopic,
+        one_win: oneWin,
+        one_improve: oneImprove,
+        gratitude,
+      }, { onConflict: 'user_id,date' });
+
+      if (error) throw error;
+
+      await awardXP('daily_log', 20);
+      showToast('Daily log saved! +20 XP', 'success');
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to save daily log', 'error');
+    }
   };
 
   const inputStyle = {
@@ -341,26 +423,97 @@ function DailyLogTab() {
 
 /* ==================== GOALS TAB ==================== */
 function GoalsTab() {
-  const [goals, setGoals] = useState<Goal[]>([
-    { id: '1', name: 'Camera Fund', target_amount: 15000, current_amount: 4200, category: 'Money', color: '#6366f1', deadline: '2026-12-31' },
-    { id: '2', name: 'Travel Fund', target_amount: 30000, current_amount: 8900, category: 'Travel', color: '#8b5cf6', deadline: '2027-06-30' },
-  ]);
+  const [goals, setGoals] = useState<Goal[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newGoal, setNewGoal] = useState({ name: '', target_amount: '', current_amount: '', category: 'Money', color: '#6366f1', deadline: '' });
+  const { showToast } = useToastStore();
 
-  const addGoal = () => {
+  useEffect(() => {
+    loadGoals();
+  }, []);
+
+  async function loadGoals() {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data } = await supabase
+        .from('goals')
+        .select('*')
+        .eq('user_id', user.id);
+      setGoals(data || []);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const addGoal = async () => {
     if (!newGoal.name || !newGoal.target_amount) return;
-    setGoals((prev) => [...prev, {
-      id: crypto.randomUUID(),
-      name: newGoal.name,
-      target_amount: Number(newGoal.target_amount),
-      current_amount: Number(newGoal.current_amount) || 0,
-      category: newGoal.category,
-      color: newGoal.color,
-      deadline: newGoal.deadline,
-    }]);
-    setNewGoal({ name: '', target_amount: '', current_amount: '', category: 'Money', color: '#6366f1', deadline: '' });
-    setShowAddForm(false);
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data: insertedGoal, error } = await supabase
+        .from('goals')
+        .insert({
+          user_id: user.id,
+          name: newGoal.name,
+          target_amount: Number(newGoal.target_amount),
+          current_amount: Number(newGoal.current_amount) || 0,
+          category: newGoal.category,
+          color: newGoal.color,
+          deadline: newGoal.deadline || null,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      if (insertedGoal) {
+        setGoals((prev) => [...prev, insertedGoal]);
+        showToast('Goal added successfully!', 'success');
+      }
+
+      setNewGoal({ name: '', target_amount: '', current_amount: '', category: 'Money', color: '#6366f1', deadline: '' });
+      setShowAddForm(false);
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to add goal', 'error');
+    }
+  };
+
+  const deleteGoal = async (id: string) => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { error } = await supabase
+        .from('goals')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+      setGoals((prev) => prev.filter((g) => g.id !== id));
+      showToast('Goal deleted', 'info');
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to delete goal', 'error');
+    }
+  };
+
+  const updateGoalProgress = async (id: string, newAmount: number) => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { error } = await supabase
+        .from('goals')
+        .update({ current_amount: newAmount })
+        .eq('id', id);
+
+      if (error) throw error;
+      setGoals((prev) => prev.map((g) => (g.id === id ? { ...g, current_amount: newAmount } : g)));
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to update goal progress', 'error');
+    }
   };
 
   const inputStyle = { background: 'var(--bg-input)', color: 'var(--text)', border: '1px solid var(--border)' };
@@ -426,11 +579,25 @@ function GoalsTab() {
               </ProgressRing>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold" style={{ color: 'var(--text)' }}>{goal.name}</p>
-                <p className="text-lg font-bold" style={{ color: goal.color }}>{formatCurrency(goal.current_amount)}</p>
+                <div className="flex items-center gap-2 mt-1">
+                  <button
+                    onClick={() => updateGoalProgress(goal.id, Math.max(0, goal.current_amount - 1000))}
+                    className="w-5 h-5 rounded bg-zinc-800 hover:bg-zinc-750 flex items-center justify-center text-[10px] text-zinc-400 font-bold"
+                  >
+                    -
+                  </button>
+                  <p className="text-lg font-bold" style={{ color: goal.color }}>{formatCurrency(goal.current_amount)}</p>
+                  <button
+                    onClick={() => updateGoalProgress(goal.id, Math.min(goal.target_amount, goal.current_amount + 1000))}
+                    className="w-5 h-5 rounded bg-zinc-800 hover:bg-zinc-750 flex items-center justify-center text-[10px] text-zinc-400 font-bold"
+                  >
+                    +
+                  </button>
+                </div>
                 <p className="text-xs" style={{ color: 'var(--text-muted)' }}>of {formatCurrency(goal.target_amount)}</p>
                 {goal.deadline && <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Due: {formatDate(goal.deadline)}</p>}
               </div>
-              <button onClick={() => setGoals((prev) => prev.filter((g) => g.id !== goal.id))} className="p-1.5 rounded-lg hover:bg-[var(--bg-input)]" style={{ color: 'var(--text-muted)' }}>
+              <button onClick={() => deleteGoal(goal.id)} className="p-1.5 rounded-lg hover:bg-[var(--bg-input)]" style={{ color: 'var(--text-muted)' }}>
                 <Trash2 size={14} />
               </button>
             </motion.div>
@@ -439,7 +606,7 @@ function GoalsTab() {
       </div>
 
       {goals.length === 0 && (
-        <EmptyState icon={<Target size={28} />} title="No goals yet" description="Set your first goal to start tracking progress." />
+        <EmptyState icon={<Target size={28} />} title="No goals yet" description="No goals yet — add your first goal in Life Tracker" />
       )}
     </div>
   );
@@ -447,11 +614,7 @@ function GoalsTab() {
 
 /* ==================== INCOME TAB ==================== */
 function IncomeTab() {
-  const [entries, setEntries] = useState<IncomeEntry[]>([
-    { id: '1', client_name: 'Fitness Page', project_type: 'Landing page', amount: 3500, status: 'Paid', date: '2026-05-20' },
-    { id: '2', client_name: 'Food Blogger', project_type: 'Full website', amount: 8000, status: 'Paid', date: '2026-05-28' },
-    { id: '3', client_name: 'Travel Vlogger', project_type: 'Link-in-bio', amount: 2500, status: 'Pending', date: '2026-06-02' },
-  ]);
+  const [entries, setEntries] = useState<IncomeEntry[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newEntry, setNewEntry] = useState<{
     client_name: string;
@@ -460,6 +623,30 @@ function IncomeTab() {
     status: IncomeEntry['status'];
     date: string;
   }>({ client_name: '', project_type: 'Landing page', amount: '', status: 'Paid', date: getToday() });
+  
+  const { awardXP } = useXPStore();
+  const { showToast } = useToastStore();
+
+  useEffect(() => {
+    loadIncome();
+  }, []);
+
+  async function loadIncome() {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data } = await supabase
+        .from('income_entries')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('date', { ascending: false });
+      setEntries(data || []);
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   const totalPaid = entries.filter((e) => e.status === 'Paid').reduce((s, e) => s + e.amount, 0);
   const totalPending = entries.filter((e) => e.status === 'Pending').reduce((s, e) => s + e.amount, 0);
@@ -472,11 +659,56 @@ function IncomeTab() {
     return acc;
   }, [] as { month: string; amount: number }[]);
 
-  const addEntry = () => {
+  const addEntry = async () => {
     if (!newEntry.client_name || !newEntry.amount) return;
-    setEntries((prev) => [{ ...newEntry, id: crypto.randomUUID(), amount: Number(newEntry.amount) }, ...prev]);
-    setNewEntry({ client_name: '', project_type: 'Landing page', amount: '', status: 'Paid', date: getToday() });
-    setShowAddForm(false);
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data: insertedEntry, error } = await supabase
+        .from('income_entries')
+        .insert({
+          user_id: user.id,
+          client_name: newEntry.client_name,
+          project_type: newEntry.project_type,
+          amount: Number(newEntry.amount),
+          status: newEntry.status,
+          date: newEntry.date,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      if (insertedEntry) {
+        setEntries((prev) => [insertedEntry, ...prev]);
+        await awardXP('income_logged', 10);
+        showToast('Income logged! +10 XP', 'success');
+      }
+
+      setNewEntry({ client_name: '', project_type: 'Landing page', amount: '', status: 'Paid', date: getToday() });
+      setShowAddForm(false);
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to log income', 'error');
+    }
+  };
+
+  const deleteEntry = async (id: string) => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { error } = await supabase
+        .from('income_entries')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+      setEntries((prev) => prev.filter((e) => e.id !== id));
+      showToast('Income entry deleted', 'info');
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to delete income entry', 'error');
+    }
   };
 
   const inputStyle = { background: 'var(--bg-input)', color: 'var(--text)', border: '1px solid var(--border)' };
@@ -561,51 +793,182 @@ function IncomeTab() {
                   entry.status === 'Pending' ? 'bg-warning/15 text-warning' : 'bg-primary/15 text-primary'
                 }`}>{entry.status}</span>
               </div>
-              <button onClick={() => setEntries((prev) => prev.filter((e) => e.id !== entry.id))} className="p-1.5 rounded-lg hover:bg-[var(--bg-input)]" style={{ color: 'var(--text-muted)' }}>
+              <button onClick={() => deleteEntry(entry.id)} className="p-1.5 rounded-lg hover:bg-[var(--bg-input)]" style={{ color: 'var(--text-muted)' }}>
                 <Trash2 size={14} />
               </button>
             </div>
           </motion.div>
         ))}
       </div>
+
+      {entries.length === 0 && (
+        <EmptyState icon={<IndianRupee size={28} />} title="No entries logged yet" description="No income logged yet — track your first project" />
+      )}
     </div>
   );
 }
 
 /* ==================== HABITS TAB ==================== */
 function HabitsTab() {
-  const [habits, setHabits] = useState<Habit[]>([
-    { id: '1', name: 'Drink 8 glasses of water', frequency: 'daily', category: 'Health', icon: '💧', streak: 5, completions: [] },
-    { id: '2', name: 'Study ML/AI', frequency: 'daily', category: 'Learning', icon: '📚', streak: 3, completions: [] },
-    { id: '3', name: 'Exercise', frequency: 'daily', category: 'Health', icon: '💪', streak: 2, completions: [] },
-    { id: '4', name: 'Read 30 minutes', frequency: 'daily', category: 'Learning', icon: '📖', streak: 7, completions: [] },
-    { id: '5', name: 'Meditate', frequency: 'daily', category: 'Health', icon: '🧘', streak: 0, completions: [] },
-  ]);
+  const [habits, setHabits] = useState<Habit[]>([]);
   const [todayCompleted, setTodayCompleted] = useState<Set<string>>(new Set());
+  const [completionsLast7, setCompletionsLast7] = useState<Record<string, Set<string>>>({});
   const [showAddForm, setShowAddForm] = useState(false);
   const [newHabit, setNewHabit] = useState({ name: '', frequency: 'daily', category: 'Health', icon: '⭐' });
 
-  const toggleHabit = (id: string) => {
-    setTodayCompleted((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const { awardXP } = useXPStore();
+  const { showToast } = useToastStore();
+  const today = getToday();
+
+  useEffect(() => {
+    loadHabits();
+  }, []);
+
+  async function loadHabits() {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data: habitsData } = await supabase
+        .from('habits')
+        .select('*')
+        .eq('user_id', user.id);
+      
+      const { data: completionsData } = await supabase
+        .from('habit_completions')
+        .select('habit_id')
+        .eq('user_id', user.id)
+        .eq('date', today);
+
+      const { data: completions7Data } = await supabase
+        .from('habit_completions')
+        .select('habit_id, date')
+        .eq('user_id', user.id)
+        .gte('date', getDaysAgo(7));
+
+      setHabits(habitsData || []);
+      setTodayCompleted(new Set(completionsData?.map((c) => c.habit_id) || []));
+
+      const completionsMap: Record<string, Set<string>> = {};
+      completions7Data?.forEach((row) => {
+        if (!completionsMap[row.habit_id]) {
+          completionsMap[row.habit_id] = new Set();
+        }
+        completionsMap[row.habit_id].add(row.date);
+      });
+      setCompletionsLast7(completionsMap);
+    } catch (e) {
+      console.error(e);
+    }
   };
 
-  const addHabit = () => {
+  const toggleHabit = async (habitId: string) => {
+    if (!isSupabaseConfigured) return;
+    const isCompleted = todayCompleted.has(habitId);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      if (isCompleted) {
+        const { error } = await supabase
+          .from('habit_completions')
+          .delete()
+          .eq('habit_id', habitId)
+          .eq('date', today);
+        if (error) throw error;
+        setTodayCompleted((prev) => {
+          const next = new Set(prev);
+          next.delete(habitId);
+          return next;
+        });
+        showToast('Habit completion removed', 'info');
+      } else {
+        const { error } = await supabase
+          .from('habit_completions')
+          .insert({
+            user_id: user.id,
+            habit_id: habitId,
+            date: today,
+          });
+        if (error) throw error;
+        setTodayCompleted((prev) => {
+          const next = new Set(prev);
+          next.add(habitId);
+          return next;
+        });
+        await awardXP('habit_done', 10);
+        showToast('Habit completed! +10 XP', 'success');
+      }
+      
+      // Reload completions list
+      loadHabits();
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to update habit', 'error');
+    }
+  };
+
+  const addHabit = async () => {
     if (!newHabit.name) return;
-    setHabits((prev) => [...prev, { ...newHabit, id: crypto.randomUUID(), streak: 0, completions: [] }]);
-    setNewHabit({ name: '', frequency: 'daily', category: 'Health', icon: '⭐' });
-    setShowAddForm(false);
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data: insertedHabit, error } = await supabase
+        .from('habits')
+        .insert({
+          user_id: user.id,
+          name: newHabit.name,
+          frequency: newHabit.frequency,
+          category: newHabit.category,
+          icon: newHabit.icon || '⭐',
+          streak: 0,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      if (insertedHabit) {
+        setHabits((prev) => [...prev, insertedHabit]);
+        showToast('Habit created!', 'success');
+      }
+
+      setNewHabit({ name: '', frequency: 'daily', category: 'Health', icon: '⭐' });
+      setShowAddForm(false);
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to create habit', 'error');
+    }
+  };
+
+  const deleteHabit = async (habitId: string) => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { error } = await supabase
+        .from('habits')
+        .delete()
+        .eq('id', habitId);
+
+      if (error) throw error;
+      setHabits((prev) => prev.filter((h) => h.id !== habitId));
+      showToast('Habit deleted', 'info');
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to delete habit', 'error');
+    }
   };
 
   const inputStyle = { background: 'var(--bg-input)', color: 'var(--text)', border: '1px solid var(--border)' };
-  const last7 = Array.from({ length: 7 }, (_, i) => {
+
+  const last7Days = Array.from({ length: 7 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
-    return d.toLocaleDateString('en-IN', { weekday: 'narrow' });
+    return {
+      label: d.toLocaleDateString('en-IN', { weekday: 'narrow' }),
+      dateStr: d.toISOString().split('T')[0],
+    };
   });
 
   return (
@@ -684,21 +1047,24 @@ function HabitsTab() {
 
               {/* Weekly dots */}
               <div className="hidden md:flex gap-1">
-                {last7.map((day, i) => (
-                  <div key={i} className="flex flex-col items-center gap-0.5">
-                    <span className="text-[8px]" style={{ color: 'var(--text-muted)' }}>{day}</span>
-                    <div
-                      className="w-3 h-3 rounded-full"
-                      style={{
-                        background: Math.random() > 0.4 ? 'var(--color-success)' : 'var(--bg-input)',
-                        opacity: 0.8,
-                      }}
-                    />
-                  </div>
-                ))}
+                {last7Days.map((dayObj, i) => {
+                  const dayCompleted = completionsLast7[habit.id]?.has(dayObj.dateStr);
+                  return (
+                    <div key={i} className="flex flex-col items-center gap-0.5">
+                      <span className="text-[8px]" style={{ color: 'var(--text-muted)' }}>{dayObj.label}</span>
+                      <div
+                        className="w-3 h-3 rounded-full"
+                        style={{
+                          background: dayCompleted ? 'var(--color-success)' : 'var(--bg-input)',
+                          opacity: 0.8,
+                        }}
+                      />
+                    </div>
+                  );
+                })}
               </div>
 
-              <button onClick={() => setHabits((prev) => prev.filter((h) => h.id !== habit.id))} className="p-1.5 rounded-lg hover:bg-[var(--bg-input)]" style={{ color: 'var(--text-muted)' }}>
+              <button onClick={() => deleteHabit(habit.id)} className="p-1.5 rounded-lg hover:bg-[var(--bg-input)]" style={{ color: 'var(--text-muted)' }}>
                 <Trash2 size={14} />
               </button>
             </motion.div>
@@ -707,7 +1073,7 @@ function HabitsTab() {
       </div>
 
       {habits.length === 0 && (
-        <EmptyState icon={<Zap size={28} />} title="No habits yet" description="Start building good habits today." />
+        <EmptyState icon={<Zap size={28} />} title="No habits yet" description="No habits yet — start building your routine" />
       )}
     </div>
   );

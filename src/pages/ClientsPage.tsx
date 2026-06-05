@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   DndContext, closestCorners, DragOverlay,
@@ -9,10 +9,13 @@ import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-
 import { CSS } from '@dnd-kit/utilities';
 import {
   Plus, X, Users, TrendingUp, Target, IndianRupee,
-  AtSign, Mail, ExternalLink, GripVertical, Check,
+  AtSign, Mail, GripVertical, Check, Trash2,
 } from 'lucide-react';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { formatCurrency, formatDate, getToday } from '@/lib/utils';
+import { formatCurrency, formatDate } from '@/lib/utils';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { useXPStore } from '@/stores/xpStore';
+import { useToastStore } from '@/stores/toastStore';
 
 interface Lead {
   id: string;
@@ -36,14 +39,6 @@ const statusColors: Record<string, string> = {
   'Project Active': '#8b5cf6',
   Completed: '#10b981',
 };
-
-const initialLeads: Lead[] = [
-  { id: '1', name: 'Fitness Guru Page', instagram_url: '@fitnessguru', email: '', service_type: 'Landing page', budget_estimate: 5000, status: 'Prospecting', notes: 'Large following, needs a proper website', follow_up_date: '2026-06-10', created_at: '2026-05-28' },
-  { id: '2', name: 'Food Blogger', instagram_url: '@tastybites', email: 'taste@email.com', service_type: 'Full website', budget_estimate: 12000, status: 'Pitched', notes: 'Sent first pitch, waiting for reply', follow_up_date: '2026-06-08', created_at: '2026-05-25' },
-  { id: '3', name: 'Travel Vlogger', instagram_url: '@wanderlust', email: '', service_type: 'Portfolio site', budget_estimate: 8000, status: 'In Talks', notes: 'Interested, discussing features', follow_up_date: '2026-06-07', created_at: '2026-05-20' },
-  { id: '4', name: 'Local Bakery', instagram_url: '@sweetdelights', email: 'bakery@email.com', service_type: 'E-commerce store', budget_estimate: 15000, status: 'Project Active', notes: 'Building their online store', follow_up_date: '', created_at: '2026-05-15' },
-  { id: '5', name: 'Yoga Studio', instagram_url: '@zenflow', email: 'zen@email.com', service_type: 'Landing page', budget_estimate: 3500, status: 'Completed', notes: 'Delivered and paid', follow_up_date: '', created_at: '2026-04-10' },
-];
 
 function SortableCard({ lead, onClick }: { lead: Lead; onClick: () => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: lead.id });
@@ -94,7 +89,7 @@ function SortableCard({ lead, onClick }: { lead: Lead; onClick: () => void }) {
 }
 
 export function ClientsPage() {
-  const [leads, setLeads] = useState<Lead[]>(initialLeads);
+  const [leads, setLeads] = useState<Lead[]>([]);
   const [showAddDrawer, setShowAddDrawer] = useState(false);
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -103,9 +98,33 @@ export function ClientsPage() {
     budget_estimate: '', notes: '', follow_up_date: '',
   });
 
+  const { awardXP } = useXPStore();
+  const { showToast } = useToastStore();
+
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
   );
+
+  useEffect(() => {
+    loadLeads();
+  }, []);
+
+  async function loadLeads() {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data } = await supabase
+        .from('leads')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
+      setLeads(data || []);
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   const getLeadsByStatus = (status: string) => leads.filter((l) => l.status === status);
 
@@ -118,37 +137,105 @@ export function ClientsPage() {
     setActiveId(event.active.id as string);
   };
 
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = async (event: DragEndEvent) => {
     setActiveId(null);
     const { active, over } = event;
     if (!over) return;
 
     const overId = over.id as string;
-    // Check if dropped on a status column
     const targetStatus = STATUSES.find((s) => s === overId);
-    if (targetStatus) {
-      setLeads((prev) =>
-        prev.map((l) => l.id === active.id ? { ...l, status: targetStatus } : l)
-      );
+    if (targetStatus && isSupabaseConfigured) {
+      const leadId = active.id as string;
+      try {
+        const { error } = await supabase
+          .from('leads')
+          .update({ status: targetStatus })
+          .eq('id', leadId);
+        if (error) throw error;
+
+        setLeads((prev) =>
+          prev.map((l) => l.id === leadId ? { ...l, status: targetStatus } : l)
+        );
+        showToast(`Lead status updated to ${targetStatus}`, 'success');
+      } catch (e: any) {
+        console.error(e);
+        showToast(e.message || 'Failed to move lead', 'error');
+      }
     }
   };
 
-  const addLead = () => {
+  const addLead = async () => {
     if (!newLead.name) return;
-    setLeads((prev) => [{
-      id: crypto.randomUUID(),
-      ...newLead,
-      budget_estimate: Number(newLead.budget_estimate) || 0,
-      status: 'Prospecting',
-      created_at: new Date().toISOString(),
-    }, ...prev]);
-    setNewLead({ name: '', instagram_url: '', email: '', service_type: 'Landing page', budget_estimate: '', notes: '', follow_up_date: '' });
-    setShowAddDrawer(false);
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data: insertedLead, error } = await supabase
+        .from('leads')
+        .insert({
+          user_id: user.id,
+          name: newLead.name,
+          instagram_url: newLead.instagram_url,
+          email: newLead.email,
+          service_type: newLead.service_type,
+          budget_estimate: Number(newLead.budget_estimate) || 0,
+          status: 'Prospecting',
+          notes: newLead.notes,
+          follow_up_date: newLead.follow_up_date || null,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      if (insertedLead) {
+        setLeads((prev) => [insertedLead, ...prev]);
+        await awardXP('lead_added', 10);
+        showToast('Lead added! +10 XP', 'success');
+      }
+
+      setNewLead({ name: '', instagram_url: '', email: '', service_type: 'Landing page', budget_estimate: '', notes: '', follow_up_date: '' });
+      setShowAddDrawer(false);
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to add lead', 'error');
+    }
   };
 
-  const markAsWon = (id: string) => {
-    setLeads((prev) => prev.map((l) => l.id === id ? { ...l, status: 'Completed' } : l));
-    setSelectedLead(null);
+  const markAsWon = async (id: string) => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { error } = await supabase
+        .from('leads')
+        .update({ status: 'Completed' })
+        .eq('id', id);
+      if (error) throw error;
+
+      setLeads((prev) => prev.map((l) => l.id === id ? { ...l, status: 'Completed' } : l));
+      setSelectedLead(null);
+      showToast('Lead marked as won! 🎉', 'success');
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to update lead', 'error');
+    }
+  };
+
+  const deleteLead = async (id: string) => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { error } = await supabase
+        .from('leads')
+        .delete()
+        .eq('id', id);
+      if (error) throw error;
+
+      setLeads((prev) => prev.filter((l) => l.id !== id));
+      setSelectedLead(null);
+      showToast('Lead deleted', 'info');
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to delete lead', 'error');
+    }
   };
 
   const inputStyle = { background: 'var(--bg-input)', color: 'var(--text)', border: '1px solid var(--border)' };
@@ -192,55 +279,63 @@ export function ClientsPage() {
         </motion.button>
       </div>
 
-      {/* Kanban Board */}
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCorners}
-        onDragStart={handleDragStart}
-        onDragEnd={handleDragEnd}
-      >
-        <div className="flex gap-4 overflow-x-auto pb-4">
-          {STATUSES.map((status) => {
-            const statusLeads = getLeadsByStatus(status);
-            return (
-              <div
-                key={status}
-                id={status}
-                className="flex-shrink-0 w-64 md:w-72 rounded-2xl p-3"
-                style={{ background: 'var(--bg-input)', minHeight: 200 }}
-              >
-                <div className="flex items-center gap-2 mb-3 px-1">
-                  <div className="w-2 h-2 rounded-full" style={{ background: statusColors[status] }} />
-                  <span className="text-xs font-semibold" style={{ color: 'var(--text)' }}>
-                    {status}
-                  </span>
-                  <span className="text-[10px] ml-auto px-1.5 py-0.5 rounded-md" style={{ background: 'var(--bg-card)', color: 'var(--text-muted)' }}>
-                    {statusLeads.length}
-                  </span>
-                </div>
-
-                <SortableContext items={statusLeads.map((l) => l.id)} strategy={verticalListSortingStrategy}>
-                  <div className="space-y-2">
-                    {statusLeads.map((lead) => (
-                      <SortableCard
-                        key={lead.id}
-                        lead={lead}
-                        onClick={() => setSelectedLead(lead)}
-                      />
-                    ))}
+      {leads.length === 0 ? (
+        <EmptyState
+          icon={<Users size={28} />}
+          title="No leads yet"
+          description="No leads yet — generate your first pitch"
+        />
+      ) : (
+        /* Kanban Board */
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCorners}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+        >
+          <div className="flex gap-4 overflow-x-auto pb-4">
+            {STATUSES.map((status) => {
+              const statusLeads = getLeadsByStatus(status);
+              return (
+                <div
+                  key={status}
+                  id={status}
+                  className="flex-shrink-0 w-64 md:w-72 rounded-2xl p-3"
+                  style={{ background: 'var(--bg-input)', minHeight: 200 }}
+                >
+                  <div className="flex items-center gap-2 mb-3 px-1">
+                    <div className="w-2 h-2 rounded-full" style={{ background: statusColors[status] }} />
+                    <span className="text-xs font-semibold" style={{ color: 'var(--text)' }}>
+                      {status}
+                    </span>
+                    <span className="text-[10px] ml-auto px-1.5 py-0.5 rounded-md" style={{ background: 'var(--bg-card)', color: 'var(--text-muted)' }}>
+                      {statusLeads.length}
+                    </span>
                   </div>
-                </SortableContext>
 
-                {statusLeads.length === 0 && (
-                  <p className="text-center text-xs py-8" style={{ color: 'var(--text-muted)' }}>
-                    Drop leads here
-                  </p>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </DndContext>
+                  <SortableContext items={statusLeads.map((l) => l.id)} strategy={verticalListSortingStrategy}>
+                    <div className="space-y-2">
+                      {statusLeads.map((lead) => (
+                        <SortableCard
+                          key={lead.id}
+                          lead={lead}
+                          onClick={() => setSelectedLead(lead)}
+                        />
+                      ))}
+                    </div>
+                  </SortableContext>
+
+                  {statusLeads.length === 0 && (
+                    <p className="text-center text-xs py-8" style={{ color: 'var(--text-muted)' }}>
+                      Drop leads here
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </DndContext>
+      )}
 
       {/* Add Lead Drawer */}
       <AnimatePresence>
@@ -328,69 +423,82 @@ export function ClientsPage() {
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="fixed inset-4 md:inset-auto md:left-1/2 md:top-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-lg z-50 rounded-2xl p-6 overflow-y-auto max-h-[90vh]"
+              className="fixed inset-4 md:inset-auto md:left-1/2 md:top-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-lg z-50 rounded-2xl p-6 overflow-y-auto max-h-[90vh] flex flex-col justify-between"
               style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', boxShadow: 'var(--shadow-lg)' }}
             >
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold" style={{ color: 'var(--text)' }}>{selectedLead.name}</h3>
-                <button onClick={() => setSelectedLead(null)} className="p-2 rounded-lg hover:bg-[var(--bg-input)]" style={{ color: 'var(--text-muted)' }}>
-                  <X size={18} />
-                </button>
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold" style={{ color: 'var(--text)' }}>{selectedLead.name}</h3>
+                  <button onClick={() => setSelectedLead(null)} className="p-2 rounded-lg hover:bg-[var(--bg-input)]" style={{ color: 'var(--text-muted)' }}>
+                    <X size={18} />
+                  </button>
+                </div>
+
+                <div className="space-y-4 mb-6">
+                  <div className="flex items-center gap-3">
+                    <span className="px-2.5 py-1 rounded-full text-xs font-medium text-white" style={{ background: statusColors[selectedLead.status] }}>
+                      {selectedLead.status}
+                    </span>
+                    <span className="text-sm font-bold" style={{ color: 'var(--text)' }}>{formatCurrency(selectedLead.budget_estimate)}</span>
+                  </div>
+
+                  {selectedLead.instagram_url && (
+                    <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--text-muted)' }}>
+                      <AtSign size={14} />
+                      {selectedLead.instagram_url}
+                    </div>
+                  )}
+                  {selectedLead.email && (
+                    <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--text-muted)' }}>
+                      <Mail size={14} />
+                      {selectedLead.email}
+                    </div>
+                  )}
+
+                  <div className="rounded-xl p-3" style={{ background: 'var(--bg-input)' }}>
+                    <p className="text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>Service</p>
+                    <p className="text-sm" style={{ color: 'var(--text)' }}>{selectedLead.service_type}</p>
+                  </div>
+
+                  {selectedLead.notes && (
+                    <div className="rounded-xl p-3" style={{ background: 'var(--bg-input)' }}>
+                      <p className="text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>Notes</p>
+                      <p className="text-sm" style={{ color: 'var(--text)' }}>{selectedLead.notes}</p>
+                    </div>
+                  )}
+
+                  {selectedLead.follow_up_date && (
+                    <div className="rounded-xl p-3" style={{ background: 'var(--bg-input)' }}>
+                      <p className="text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>Follow-up</p>
+                      <p className="text-sm" style={{ color: 'var(--text)' }}>{formatDate(selectedLead.follow_up_date)}</p>
+                    </div>
+                  )}
+
+                  <p className="text-xs" style={{ color: 'var(--text-muted)' }}>Added: {formatDate(selectedLead.created_at)}</p>
+                </div>
               </div>
 
-              <div className="space-y-4">
-                <div className="flex items-center gap-3">
-                  <span className="px-2.5 py-1 rounded-full text-xs font-medium text-white" style={{ background: statusColors[selectedLead.status] }}>
-                    {selectedLead.status}
-                  </span>
-                  <span className="text-sm font-bold" style={{ color: 'var(--text)' }}>{formatCurrency(selectedLead.budget_estimate)}</span>
-                </div>
-
-                {selectedLead.instagram_url && (
-                  <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--text-muted)' }}>
-                    <AtSign size={14} />
-                    {selectedLead.instagram_url}
-                  </div>
-                )}
-                {selectedLead.email && (
-                  <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--text-muted)' }}>
-                    <Mail size={14} />
-                    {selectedLead.email}
-                  </div>
-                )}
-
-                <div className="rounded-xl p-3" style={{ background: 'var(--bg-input)' }}>
-                  <p className="text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>Service</p>
-                  <p className="text-sm" style={{ color: 'var(--text)' }}>{selectedLead.service_type}</p>
-                </div>
-
-                {selectedLead.notes && (
-                  <div className="rounded-xl p-3" style={{ background: 'var(--bg-input)' }}>
-                    <p className="text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>Notes</p>
-                    <p className="text-sm" style={{ color: 'var(--text)' }}>{selectedLead.notes}</p>
-                  </div>
-                )}
-
-                {selectedLead.follow_up_date && (
-                  <div className="rounded-xl p-3" style={{ background: 'var(--bg-input)' }}>
-                    <p className="text-xs font-medium mb-1" style={{ color: 'var(--text-muted)' }}>Follow-up</p>
-                    <p className="text-sm" style={{ color: 'var(--text)' }}>{formatDate(selectedLead.follow_up_date)}</p>
-                  </div>
-                )}
-
-                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>Added: {formatDate(selectedLead.created_at)}</p>
-
+              <div className="flex gap-2 pt-2 border-t" style={{ borderColor: 'var(--border)' }}>
                 {selectedLead.status !== 'Completed' && (
                   <motion.button
                     whileHover={{ scale: 1.01 }}
                     whileTap={{ scale: 0.99 }}
                     onClick={() => markAsWon(selectedLead.id)}
-                    className="w-full py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-success to-emerald-500 flex items-center justify-center gap-2"
+                    className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-success to-emerald-500 flex items-center justify-center gap-2"
                   >
                     <Check size={16} />
                     Mark as won
                   </motion.button>
                 )}
+                <motion.button
+                  whileHover={{ scale: 1.01 }}
+                  whileTap={{ scale: 0.99 }}
+                  onClick={() => deleteLead(selectedLead.id)}
+                  className="px-4 py-2.5 rounded-xl text-sm font-semibold text-danger border border-danger/25 hover:bg-danger/5 flex items-center justify-center gap-2"
+                >
+                  <Trash2 size={16} />
+                  Delete
+                </motion.button>
               </div>
             </motion.div>
           </>

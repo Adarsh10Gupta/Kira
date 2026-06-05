@@ -1,10 +1,13 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle2, Circle, BookOpen, MessageCircle, Award, ChevronDown, ChevronRight, Clock, ExternalLink } from 'lucide-react';
+import { CheckCircle2, Circle, BookOpen, MessageCircle, Award, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import confetti from 'canvas-confetti';
 import { ProgressRing } from '@/components/ui/ProgressRing';
 import { roadmapPhases, getTotalTopics } from '@/data/roadmap';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { useXPStore } from '@/stores/xpStore';
+import { useToastStore } from '@/stores/toastStore';
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -21,46 +24,95 @@ const itemVariants = {
 
 export function LearnPage() {
   const navigate = useNavigate();
-  const [completedTopics, setCompletedTopics] = useState<Set<string>>(() => {
-    const saved = localStorage.getItem('kira-roadmap-progress');
-    return saved ? new Set(JSON.parse(saved)) : new Set();
-  });
+  const [completedTopics, setCompletedTopics] = useState<Set<string>>(new Set());
   const [expandedPhases, setExpandedPhases] = useState<Set<string>>(new Set(['phase-1']));
   const [celebratingPhase, setCelebratingPhase] = useState<string | null>(null);
 
+  const { showToast } = useToastStore();
+
   const totalTopics = getTotalTopics();
-  const overallProgress = (completedTopics.size / totalTopics) * 100;
+  const overallProgress = totalTopics > 0 ? (completedTopics.size / totalTopics) * 100 : 0;
 
   useEffect(() => {
-    localStorage.setItem('kira-roadmap-progress', JSON.stringify([...completedTopics]));
-  }, [completedTopics]);
+    loadRoadmapProgress();
+  }, []);
 
-  const toggleTopic = (topicId: string, phaseId: string) => {
-    setCompletedTopics((prev) => {
-      const next = new Set(prev);
-      if (next.has(topicId)) {
-        next.delete(topicId);
-      } else {
-        next.add(topicId);
+  const loadRoadmapProgress = async () => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-        // Check if phase is now complete
-        const phase = roadmapPhases.find((p) => p.id === phaseId);
-        if (phase) {
-          const allDone = phase.topics.every((t) => next.has(t.id));
-          if (allDone && !celebratingPhase) {
-            setCelebratingPhase(phaseId);
-            confetti({
-              particleCount: 100,
-              spread: 70,
-              origin: { y: 0.6 },
-              colors: ['#6366f1', '#8b5cf6', '#06b6d4', '#10b981'],
-            });
-            setTimeout(() => setCelebratingPhase(null), 3000);
+      const { data } = await supabase
+        .from('roadmap_progress')
+        .select('*')
+        .eq('user_id', user.id);
+
+      const completed = new Set<string>(data?.filter((p) => p.completed).map((p) => p.topic_id) || []);
+      setCompletedTopics(completed);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const toggleTopic = async (topicId: string, phaseId: string) => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const isCompleted = completedTopics.has(topicId);
+      
+      const { error } = await supabase.from('roadmap_progress').upsert({
+        user_id: user.id,
+        topic_id: topicId,
+        completed: !isCompleted,
+        completed_at: !isCompleted ? new Date().toISOString() : null
+      }, { onConflict: 'user_id,topic_id' });
+
+      if (error) throw error;
+
+      setCompletedTopics((prev) => {
+        const next = new Set(prev);
+        if (isCompleted) {
+          next.delete(topicId);
+        } else {
+          next.add(topicId);
+
+          // Check if phase is now complete
+          const phase = roadmapPhases.find((p) => p.id === phaseId);
+          if (phase) {
+            const allDone = phase.topics.every((t) => next.has(t.id));
+            if (allDone && !celebratingPhase) {
+              setCelebratingPhase(phaseId);
+              confetti({
+                particleCount: 100,
+                spread: 70,
+                origin: { y: 0.6 },
+                colors: ['#6366f1', '#8b5cf6', '#06b6d4', '#10b981'],
+              });
+              setTimeout(() => setCelebratingPhase(null), 3000);
+            }
           }
         }
+        return next;
+      });
+
+      if (!isCompleted) {
+        await supabase.from('xp_log').insert({
+          user_id: user.id,
+          action: 'topic_completed',
+          xp: 25
+        });
+        await useXPStore.getState().initXP();
+        showToast('Topic completed! +25 XP', 'success');
+      } else {
+        showToast('Topic marked incomplete', 'info');
       }
-      return next;
-    });
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to update progress', 'error');
+    }
   };
 
   const togglePhase = (phaseId: string) => {
@@ -84,7 +136,6 @@ export function LearnPage() {
 
   const askClaude = (topic: string) => {
     navigate('/coach');
-    // Would set a pending message in a store, for now just navigate
   };
 
   return (

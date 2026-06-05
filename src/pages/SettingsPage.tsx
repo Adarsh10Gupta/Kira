@@ -30,7 +30,11 @@ export function SettingsPage() {
   const [saved, setSaved] = useState(false);
 
   // API Keys States
-  const [claudeKey, setClaudeKey] = useState(localStorage.getItem('KIRA_CLAUDE_KEY') || '');
+  const [claudeKey, setClaudeKey] = useState(
+    localStorage.getItem('KIRA_GEMINI_KEY') ||
+    localStorage.getItem('KIRA_CLAUDE_KEY') ||
+    ''
+  );
   const [sbUrl, setSbUrl] = useState(localStorage.getItem('KIRA_SUPABASE_URL') || '');
   const [sbKey, setSbKey] = useState(localStorage.getItem('KIRA_SUPABASE_ANON_KEY') || '');
   
@@ -52,6 +56,7 @@ export function SettingsPage() {
   };
 
   const handleSaveKeys = () => {
+    localStorage.setItem('KIRA_GEMINI_KEY', claudeKey);
     localStorage.setItem('KIRA_CLAUDE_KEY', claudeKey);
     localStorage.setItem('KIRA_SUPABASE_URL', sbUrl);
     localStorage.setItem('KIRA_SUPABASE_ANON_KEY', sbKey);
@@ -166,6 +171,7 @@ export function SettingsPage() {
       localStorage.removeItem('KIRA_MORNING_BRIEF_DATA');
       localStorage.removeItem('KIRA_MORNING_BRIEF_DATE');
       localStorage.removeItem('KIRA_CLAUDE_KEY');
+      localStorage.removeItem('KIRA_GEMINI_KEY');
       localStorage.removeItem('KIRA_SUPABASE_URL');
       localStorage.removeItem('KIRA_SUPABASE_ANON_KEY');
 

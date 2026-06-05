@@ -2,14 +2,13 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Salad, Calculator, FileText, Droplet, Plus, Minus, Trash2, 
-  Sparkles, Check, Loader2, ArrowRight, Info
+  Sparkles, Check, Loader2, Info
 } from 'lucide-react';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useXPStore } from '@/stores/xpStore';
 import { useToastStore } from '@/stores/toastStore';
 import { callClaude } from '@/lib/claude';
 import { getToday } from '@/lib/utils';
-import { db } from '@/lib/db';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 
 type Tab = 'calculator' | 'food' | 'planner' | 'water';
@@ -56,7 +55,6 @@ export function DietPage() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [scannedFood, setScannedFood] = useState<FoodItem | null>(null);
   const [dailyFoods, setDailyFoods] = useState<FoodItem[]>([]);
-  const [foodLogId, setFoodLogId] = useState<string | null>(null);
 
   // Tab 3: Meal Planner States
   const [preference, setPreference] = useState<'Veg' | 'Non-veg' | 'Vegan'>('Veg');
@@ -75,118 +73,95 @@ export function DietPage() {
     loadUserData();
   }, []);
 
-  const loadUserData = async () => {
-    // 1. Load nutrition profile
-    let fetchedProfile: NutritionProfile | null = null;
-    let userId = 'demo-user';
+  async function loadUserData() {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-    if (isSupabaseConfigured) {
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
-          userId = user.id;
-          const { data } = await supabase
-            .from('nutrition_profiles')
-            .select('*')
-            .single();
-          if (data) fetchedProfile = data as unknown as NutritionProfile;
+      const todayStr = getToday();
+
+      // 1. Load nutrition profile
+      const { data: profileRow } = await supabase
+        .from('nutrition_profiles')
+        .select('*')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (profileRow) {
+        const fetchedProfile: NutritionProfile = {
+          weight_kg: profileRow.weight_kg,
+          height_cm: profileRow.height_cm,
+          age: profileRow.age,
+          gender: profileRow.gender,
+          activity_level: profileRow.activity_level,
+          goal: profileRow.goal,
+          protein_target: profileRow.protein_target,
+          calorie_target: profileRow.calorie_target,
+          meal_plan: profileRow.meal_plan || null,
+        };
+        setProfileResults(fetchedProfile);
+        setWeight(String(fetchedProfile.weight_kg));
+        setHeight(String(fetchedProfile.height_cm));
+        setAge(String(fetchedProfile.age));
+        setGender(fetchedProfile.gender);
+        setActivity(fetchedProfile.activity_level);
+        setGoal(fetchedProfile.goal);
+        if (fetchedProfile.meal_plan) {
+          setMealPlan(fetchedProfile.meal_plan);
         }
-      } catch (err) {
-        console.error(err);
       }
-    }
 
-    try {
-      const local = await db.nutrition_profiles.toArray();
-      if (!fetchedProfile && local.length > 0) {
-        fetchedProfile = local[0].config as NutritionProfile;
+      // 2. Load food logs for today
+      const { data: foodLogRow } = await supabase
+        .from('food_logs')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('date', todayStr)
+        .maybeSingle();
+      if (foodLogRow) {
+        setDailyFoods(foodLogRow.foods || []);
+      } else {
+        setDailyFoods([]);
       }
-    } catch (err) {
-      console.error(err);
-    }
 
-    if (fetchedProfile) {
-      setProfileResults(fetchedProfile);
-      setWeight(String(fetchedProfile.weight_kg));
-      setHeight(String(fetchedProfile.height_cm));
-      setAge(String(fetchedProfile.age));
-      setGender(fetchedProfile.gender);
-      setActivity(fetchedProfile.activity_level);
-      setGoal(fetchedProfile.goal);
-      if (fetchedProfile.meal_plan) {
-        setMealPlan(fetchedProfile.meal_plan);
+      // 3. Load daily logs for water tracker
+      const { data: dailyLogRow } = await supabase
+        .from('daily_logs')
+        .select('water_glasses')
+        .eq('user_id', user.id)
+        .eq('date', todayStr)
+        .maybeSingle();
+      if (dailyLogRow) {
+        setWaterGlasses(dailyLogRow.water_glasses || 0);
+      } else {
+        setWaterGlasses(0);
       }
+
+      calculateWaterStreak();
+    } catch (e) {
+      console.error('Failed to load user data:', e);
     }
-
-    // 2. Load food logs for today
-    let fetchedFoods: FoodItem[] = [];
-    const todayStr = getToday();
-
-    if (isSupabaseConfigured) {
-      try {
-        const { data } = await supabase
-          .from('food_logs')
-          .select('*')
-          .eq('date', todayStr)
-          .single();
-        if (data) {
-          fetchedFoods = data.foods || [];
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    }
-
-    try {
-      const localLog = await db.food_logs.where({ date: todayStr }).first();
-      if (fetchedFoods.length === 0 && localLog) {
-        fetchedFoods = localLog.foods;
-        setFoodLogId(localLog.id || null);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-    setDailyFoods(fetchedFoods);
-
-    // 3. Load daily logs for water tracker
-    let fetchedWater = 0;
-    if (isSupabaseConfigured) {
-      try {
-        const { data } = await supabase
-          .from('daily_logs')
-          .select('water_glasses')
-          .eq('date', todayStr)
-          .single();
-        if (data) fetchedWater = data.water_glasses || 0;
-      } catch (err) {
-        console.error(err);
-      }
-    }
-
-    try {
-      const localDaily = await db.daily_logs.where({ date: todayStr }).first();
-      if (fetchedWater === 0 && localDaily) {
-        fetchedWater = localDaily.water_glasses || 0;
-      }
-    } catch (err) {
-      console.error(err);
-    }
-    setWaterGlasses(fetchedWater);
-
-    // Calculate water streak
-    calculateWaterStreak();
   };
 
   const calculateWaterStreak = async () => {
+    if (!isSupabaseConfigured) return;
     try {
-      const logs = await db.daily_logs.orderBy('date').reverse().toArray();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data } = await supabase
+        .from('daily_logs')
+        .select('date, water_glasses')
+        .eq('user_id', user.id)
+        .order('date', { ascending: false });
+
       let streak = 0;
       const todayStr = getToday();
       
-      // Check if we hit the target on consecutive days
-      for (const log of logs) {
+      for (const log of (data || [])) {
         if (log.date === todayStr && log.water_glasses && log.water_glasses < waterTarget) {
-          continue; // today not finished yet
+          continue;
         }
         if (log.water_glasses && log.water_glasses >= waterTarget) {
           streak++;
@@ -213,7 +188,6 @@ export function DietPage() {
 
     setCalcLoading(true);
 
-    // BMR - Mifflin-St Jeor
     let bmr = 10 * w + 6.25 * h - 5 * a;
     if (gender === 'Male') {
       bmr += 5;
@@ -221,7 +195,6 @@ export function DietPage() {
       bmr -= 161;
     }
 
-    // TDEE Activity Factor
     let factor = 1.2;
     if (activity.includes('Lightly')) factor = 1.375;
     else if (activity.includes('Moderately')) factor = 1.55;
@@ -230,7 +203,6 @@ export function DietPage() {
 
     const tdee = bmr * factor;
 
-    // Adjust for goals
     let calories = tdee;
     if (goal === 'Lose fat') calories -= 500;
     else if (goal === 'Build muscle') calories += 300;
@@ -238,7 +210,6 @@ export function DietPage() {
 
     calories = Math.round(calories);
 
-    // Protein multiplier (g/kg)
     let pMultiplier = 1.8;
     if (goal === 'Lose fat' || goal === 'Build muscle') pMultiplier = 2.2;
     else if (goal === 'Bulk') pMultiplier = 2.0;
@@ -258,15 +229,12 @@ export function DietPage() {
 
     setProfileResults(result);
 
-    // Save results
-    let userId = 'demo-user';
     if (isSupabaseConfigured) {
       try {
         const { data: { user } } = await supabase.auth.getUser();
         if (user) {
-          userId = user.id;
-          await supabase.from('nutrition_profiles').upsert({
-            user_id: userId,
+          const { error } = await supabase.from('nutrition_profiles').upsert({
+            user_id: user.id,
             weight_kg: w,
             height_cm: h,
             age: a,
@@ -275,26 +243,18 @@ export function DietPage() {
             goal,
             protein_target: protein,
             calorie_target: calories,
-          });
+          }, { onConflict: 'user_id' });
+
+          if (error) throw error;
+
+          await awardXP('Configured nutrition targets', 20);
+          showToast('Targets calculated and saved! +20 XP', 'success');
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error(err);
+        showToast(err.message || 'Failed to save calculation', 'error');
       }
     }
-
-    try {
-      await db.nutrition_profiles.put({
-        user_id: userId,
-        config: result,
-        updated_at: new Date().toISOString(),
-        synced: isSupabaseConfigured,
-      });
-    } catch (err) {
-      console.error(err);
-    }
-
-    awardXP('Configured nutrition targets', 20);
-    showToast('Targets calculated and saved!', 'success');
     setCalcLoading(false);
   };
 
@@ -304,12 +264,13 @@ export function DietPage() {
     setSearchLoading(true);
     setScannedFood(null);
 
-    const systemPrompt = `You are a nutrition database. When given a food item and quantity, return ONLY a valid JSON object (no explanations, no codeblocks, no markdown) with this exact keys: { "name": "Food Name", "calories": 120, "protein_g": 10, "carbs_g": 15, "fat_g": 5, "fiber_g": 2 }. Use standard averages.`;
+    const systemPrompt = `You are a nutrition database. Return ONLY a JSON object with no markdown, no explanation:
+{"name": string, "calories": number, "protein_g": number, "carbs_g": number, "fat_g": number, "fiber_g": number}`;
 
     try {
-      const response = await callClaude(systemPrompt, [{ role: 'user', content: searchQuery }]);
-      const cleaned = response.replace(/```json/g, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(cleaned);
+      const response = await callClaude(systemPrompt, [{ role: 'user', content: searchQuery }], 200);
+      const clean = response.replace(/```json|```/g, '').trim();
+      const parsed = JSON.parse(clean);
 
       if (parsed.name && typeof parsed.calories === 'number') {
         setScannedFood({
@@ -326,7 +287,7 @@ export function DietPage() {
       }
     } catch (err) {
       console.error(err);
-      showToast('Claude failed to scan food. Check API keys.', 'error');
+      showToast('AI scanner failed. Check API keys.', 'error');
     } finally {
       setSearchLoading(false);
     }
@@ -334,98 +295,84 @@ export function DietPage() {
 
   const logFoodItem = async () => {
     if (!scannedFood) return;
-
-    const newFoods = [...dailyFoods, scannedFood];
-    setDailyFoods(newFoods);
-    setScannedFood(null);
-    setSearchQuery('');
-
-    const calories = newFoods.reduce((sum, item) => sum + item.calories, 0);
-    const protein = newFoods.reduce((sum, item) => sum + item.protein_g, 0);
-
-    let userId = 'demo-user';
-    const dateStr = getToday();
-
-    if (isSupabaseConfigured) {
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
-          userId = user.id;
-          await supabase.from('food_logs').upsert({
-            user_id: userId,
-            date: dateStr,
-            foods: newFoods,
-            total_calories: calories,
-            total_protein: protein,
-          });
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    }
+    if (!isSupabaseConfigured) return;
 
     try {
-      const newId = await db.food_logs.put({
-        id: foodLogId || undefined,
-        user_id: userId,
-        date: dateStr,
-        foods: newFoods,
-        total_calories: calories,
-        total_protein: protein,
-        synced: isSupabaseConfigured,
-      });
-      if (newId) setFoodLogId(String(newId));
-    } catch (err) {
-      console.error(err);
-    }
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-    awardXP('Logged food item', 5);
-    showToast('Food logged successfully!', 'success');
+      const todayStr = getToday();
+
+      // Get existing log for today
+      const { data: existing } = await supabase
+        .from('food_logs')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('date', todayStr)
+        .maybeSingle();
+
+      const updatedFoods = [...(existing?.foods || []), scannedFood];
+      const totalCalories = updatedFoods.reduce((sum, f) => sum + f.calories, 0);
+      const totalProtein = updatedFoods.reduce((sum, f) => sum + f.protein_g, 0);
+
+      const { error } = await supabase.from('food_logs').upsert({
+        user_id: user.id,
+        date: todayStr,
+        foods: updatedFoods,
+        total_calories: totalCalories,
+        total_protein: totalProtein
+      }, { onConflict: 'user_id,date' });
+
+      if (error) throw error;
+
+      setDailyFoods(updatedFoods);
+      setScannedFood(null);
+      setSearchQuery('');
+
+      await awardXP('food_logged', 5);
+      showToast('Food logged successfully! +5 XP', 'success');
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || 'Failed to log food', 'error');
+    }
   };
 
   const deleteFoodItem = async (id: string) => {
-    const newFoods = dailyFoods.filter((f) => f.id !== id);
-    setDailyFoods(newFoods);
-
-    const calories = newFoods.reduce((sum, item) => sum + item.calories, 0);
-    const protein = newFoods.reduce((sum, item) => sum + item.protein_g, 0);
-
-    let userId = 'demo-user';
-    const dateStr = getToday();
-
-    if (isSupabaseConfigured) {
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
-          userId = user.id;
-          await supabase.from('food_logs').upsert({
-            user_id: userId,
-            date: dateStr,
-            foods: newFoods,
-            total_calories: calories,
-            total_protein: protein,
-          });
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    }
+    if (!isSupabaseConfigured) return;
 
     try {
-      await db.food_logs.put({
-        id: foodLogId || undefined,
-        user_id: userId,
-        date: dateStr,
-        foods: newFoods,
-        total_calories: calories,
-        total_protein: protein,
-        synced: isSupabaseConfigured,
-      });
-    } catch (err) {
-      console.error(err);
-    }
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-    showToast('Food entry deleted', 'info');
+      const todayStr = getToday();
+
+      const { data: existing } = await supabase
+        .from('food_logs')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('date', todayStr)
+        .maybeSingle();
+
+      const updatedFoods = (existing?.foods || []).filter((f: any) => f.id !== id);
+      const totalCalories = updatedFoods.reduce((sum: number, f: any) => sum + f.calories, 0);
+      const totalProtein = updatedFoods.reduce((sum: number, f: any) => sum + f.protein_g, 0);
+
+      const { error } = await supabase.from('food_logs').upsert({
+        user_id: user.id,
+        date: todayStr,
+        foods: updatedFoods,
+        total_calories: totalCalories,
+        total_protein: totalProtein
+      }, { onConflict: 'user_id,date' });
+
+      if (error) throw error;
+
+      setDailyFoods(updatedFoods);
+      showToast('Food entry deleted', 'info');
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || 'Failed to delete food entry', 'error');
+    }
   };
 
   // Tab 3: Meal Planner Generator
@@ -456,8 +403,8 @@ export function DietPage() {
 
     try {
       const response = await callClaude(systemPrompt, [{ role: 'user', content: prompt }]);
-      const cleaned = response.replace(/```json/g, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(cleaned);
+      const clean = response.replace(/```json|```/g, '').trim();
+      const parsed = JSON.parse(clean);
 
       if (parsed.days && Array.isArray(parsed.days)) {
         setMealPlan(parsed);
@@ -466,7 +413,7 @@ export function DietPage() {
       }
     } catch (e) {
       console.error(e);
-      showToast('Claude plan generation failed. Check API configuration.', 'error');
+      showToast('AI plan generation failed. Check API configuration.', 'error');
     } finally {
       setPlanLoading(false);
     }
@@ -474,93 +421,67 @@ export function DietPage() {
 
   const saveMealPlan = async () => {
     if (!mealPlan || !profileResults) return;
-
-    const updatedProfile = { ...profileResults, meal_plan: mealPlan };
-    setProfileResults(updatedProfile);
-
-    let userId = 'demo-user';
-    if (isSupabaseConfigured) {
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
-          userId = user.id;
-          await supabase.from('nutrition_profiles').upsert({
-            user_id: userId,
-            ...updatedProfile,
-          });
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    }
+    if (!isSupabaseConfigured) return;
 
     try {
-      await db.nutrition_profiles.put({
-        user_id: userId,
-        config: updatedProfile,
-        updated_at: new Date().toISOString(),
-        synced: isSupabaseConfigured,
-      });
-    } catch (err) {
-      console.error(err);
-    }
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-    awardXP('Saved meal plan', 15);
-    showToast('Meal plan saved to profile!', 'success');
+      const updatedProfile = { ...profileResults, meal_plan: mealPlan };
+      setProfileResults(updatedProfile);
+
+      const { error } = await supabase.from('nutrition_profiles').upsert({
+        user_id: user.id,
+        ...updatedProfile,
+      }, { onConflict: 'user_id' });
+
+      if (error) throw error;
+
+      await awardXP('Saved meal plan', 15);
+      showToast('Meal plan saved to profile! +15 XP', 'success');
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || 'Failed to save meal plan', 'error');
+    }
   };
 
   // Tab 4: Water Tracker actions
   const adjustWater = async (diff: number) => {
+    if (!isSupabaseConfigured) return;
     const newVal = Math.max(0, waterGlasses + diff);
-    setWaterGlasses(newVal);
 
-    const dateStr = getToday();
-    let userId = 'demo-user';
-
-    // Update daily_logs table in Supabase
-    if (isSupabaseConfigured) {
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
-          userId = user.id;
-          await supabase.from('daily_logs').upsert({
-            user_id: userId,
-            date: dateStr,
-            water_glasses: newVal,
-          });
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    }
-
-    // Update local Dexie DB
     try {
-      const existing = await db.daily_logs.where({ date: dateStr }).first();
-      await db.daily_logs.put({
-        id: existing?.id || undefined,
-        user_id: userId,
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const dateStr = getToday();
+
+      const { error } = await supabase.from('daily_logs').upsert({
+        user_id: user.id,
         date: dateStr,
         water_glasses: newVal,
-        synced: isSupabaseConfigured,
-      });
-    } catch (e) {
-      console.error(e);
-    }
+      }, { onConflict: 'user_id,date' });
 
-    if (newVal === waterTarget && waterGlasses < waterTarget) {
-      awardXP('Met water hydration target', 10);
-      showToast('Daily hydration target met! 💧 +10 XP', 'success');
+      if (error) throw error;
+
+      setWaterGlasses(newVal);
+
+      if (newVal === waterTarget && waterGlasses < waterTarget) {
+        await awardXP('Met water hydration target', 10);
+        showToast('Daily hydration target met! 💧 +10 XP', 'success');
+      }
+      
+      calculateWaterStreak();
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Failed to update hydration', 'error');
     }
-    
-    calculateWaterStreak();
   };
 
   // Pie chart config for macros
   const getPieData = () => {
     if (!profileResults) return [];
     
-    // Grams calculation
     const p = profileResults.protein_target;
     const pCal = p * 4;
     const fCal = profileResults.calorie_target * 0.25;
@@ -577,7 +498,6 @@ export function DietPage() {
 
   const macroData = getPieData();
 
-  // Progress Bar Helper
   const getProgressColor = (current: number, target: number, isProtein = false) => {
     const ratio = current / target;
     if (isProtein) {
@@ -601,7 +521,6 @@ export function DietPage() {
   const carbTarget = Math.round((calTarget * 0.5) / 4);
   const fatTarget = Math.round((calTarget * 0.25) / 9);
 
-  // BMI helper
   const getBMICategory = (w: number, h: number) => {
     const bmi = w / Math.pow(h / 100, 2);
     let category = 'Normal';
@@ -921,10 +840,10 @@ export function DietPage() {
                   {dailyFoods.length > 0 ? (
                     <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
                       {dailyFoods.map((food) => (
-                        <div key={food.id} className="p-3 bg-zinc-900/40 rounded-xl border border-zinc-850 flex items-center justify-between gap-3 text-xs">
+                        <div key={food.id} className="p-3 bg-zinc-900/40 rounded-xl border border-zinc-850 flex items-center justify-between gap-3 text-xs" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)' }}>
                           <div>
                             <p className="font-semibold text-white">{food.name}</p>
-                            <p className="text-[10px] text-zinc-500 mt-0.5">
+                            <p className="text-[10px] text-zinc-505 mt-0.5" style={{ color: 'var(--text-muted)' }}>
                               {food.calories} kcal · P: {food.protein_g}g · C: {food.carbs_g}g · F: {food.fat_g}g
                             </p>
                           </div>
@@ -990,7 +909,7 @@ export function DietPage() {
                   <button
                     onClick={generateMealPlan}
                     disabled={planLoading}
-                    className="flex-1 py-2.5 bg-gradient-to-r from-primary to-secondary text-white text-xs font-semibold rounded-xl flex items-center justify-center gap-1.5"
+                    className="flex-1 py-2.5 bg-gradient-to-r from-primary to-secondary text-white text-xs font-semibold rounded-xl flex items-center justify-center gap-1.5 disabled:opacity-50"
                   >
                     {planLoading ? <Loader2 className="animate-spin" size={14} /> : <Sparkles size={14} />}
                     Generate Meal Plan
@@ -999,6 +918,7 @@ export function DietPage() {
                     <button
                       onClick={saveMealPlan}
                       className="px-5 py-2.5 border border-zinc-800 bg-zinc-900 text-zinc-300 text-xs font-semibold rounded-xl flex items-center gap-1.5 hover:bg-zinc-850"
+                      style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text)' }}
                     >
                       <Check size={14} /> Save Plan
                     </button>
@@ -1023,9 +943,9 @@ export function DietPage() {
                             const meal = dayItem.meals[mealKey];
                             return (
                               <div key={mealKey} className="space-y-0.5">
-                                <span className="text-[9px] uppercase font-bold text-zinc-500 tracking-wide">{mealKey}</span>
-                                <p className="text-xs font-semibold text-white">{meal.name}</p>
-                                <p className="text-[10px] text-zinc-500 font-mono mt-0.5">{meal.macros}</p>
+                                <span className="text-[9px] uppercase font-bold text-zinc-505 tracking-wide" style={{ color: 'var(--text-muted)' }}>{mealKey}</span>
+                                <p className="text-xs font-semibold text-white">{meal?.name}</p>
+                                <p className="text-[10px] text-zinc-500 font-mono mt-0.5">{meal?.macros}</p>
                               </div>
                             );
                           })}
@@ -1080,6 +1000,7 @@ export function DietPage() {
                     whileTap={{ scale: 0.95 }}
                     onClick={() => adjustWater(-1)}
                     className="w-12 h-12 rounded-2xl flex items-center justify-center bg-zinc-900 border border-zinc-850 hover:bg-zinc-850 text-zinc-300"
+                    style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text)' }}
                   >
                     <Minus size={20} />
                   </motion.button>
